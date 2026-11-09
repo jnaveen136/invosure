@@ -140,6 +140,145 @@ def correct(run_id: str, req: CorrectReq):
     return {"id": run_id}
 
 
+@app.post("/api/runs/{run_id}/recheck")
+def recheck(run_id: str):
+    """Run every check again on the values already read, e.g. after adding the vendor or PO it needed."""
+    r = store.get_run(run_id)
+    if not r or r["status"] != "done":
+        raise HTTPException(404, "Invoice not found or still running")
+    meta = r.get("meta") or {}
+    if not meta.get("extracted"):
+        raise HTTPException(400, "This invoice was processed before re-checks were supported; process it again")
+    meta["reuse"] = True
+    meta.setdefault("timeline", []).append({"at": datetime.now().isoformat(timespec="seconds"),
+                                            "text": "Checked again after vendor or purchase order records were updated.", "kind": "info"})
+    r.update(meta=meta, review=None, status="running", decision=None, final_status=None)
+    store.save_run(r)
+    threading.Thread(target=pipeline.run_pipeline, args=(r, min(STAGE_DELAY, 0.15)), daemon=True).start()
+    return {"id": run_id}
+
+
+# =========================================================================== vendors and purchase orders
+
+
+class VendorReq(BaseModel):
+    name: str
+    tax_id: str = ""
+    bank_account: str = ""
+    bank_routing: str = ""
+    currency: str = "USD"
+    payment_terms_days: int = 30
+    contact_email: str = ""
+    phone: str = ""
+
+
+@app.post("/api/vendors")
+def add_vendor(req: VendorReq):
+    name = req.name.strip()
+    if not name:
+        raise HTTPException(400, "Vendor name is required")
+    ref = store.reference()
+    norm = lambda x: "".join(ch for ch in (x or "").upper() if ch.isalnum())
+    for v in ref["vendors"].values():
+        if v["name"].strip().lower() == name.lower():
+            raise HTTPException(400, f"{v['name']} is already in the vendor list ({v['vendor_id']})")
+        if req.tax_id.strip() and norm(v["tax_id"]) == norm(req.tax_id):
+            raise HTTPException(400, f"Tax ID {req.tax_id} already belongs to {v['name']}")
+    nums = [int("".join(ch for ch in vid if ch.isdigit()) or 0) for vid in ref["vendors"]]
+    vid = f"V{max(nums + [0]) + 1:03d}"
+    vendor = {"vendor_id": vid, "name": name, "aliases": "", "tax_id": req.tax_id.strip(), "status": "active",
+              "bank_account": "".join(ch for ch in req.bank_account if ch.isalnum()).upper(),
+              "bank_routing": req.bank_routing.strip().upper(), "currency": (req.currency or "USD").strip().upper(),
+              "payment_terms_days": str(max(0, req.payment_terms_days)), "contact_email": req.contact_email.strip(),
+              "phone": req.phone.strip()}
+    added = store.load_added()
+    added["vendors"].append(vendor)
+    store.save_added(added)
+    return {**vendor, "added": True}
+
+
+class POLine(BaseModel):
+    description: str
+    qty: float
+    unit_price: float
+    line_type: str = "goods"
+    received: float = 0
+
+
+class POReq(BaseModel):
+    po_number: str = ""
+    vendor_id: str
+    po_date: str = ""
+    currency: str = ""
+    buyer: str = ""
+    lines: list[POLine]
+
+
+@app.get("/api/pos/next-number")
+def next_po_number():
+    nums = [int("".join(ch for ch in p if ch.isdigit()) or 0) for p in store.reference()["pos"]]
+    return {"po_number": f"PO-{max(nums + [2000]) + 1}"}
+
+
+@app.post("/api/pos")
+def add_po(req: POReq):
+    ref = store.reference()
+    vendor = ref["vendors"].get(req.vendor_id)
+    if not vendor:
+        raise HTTPException(400, "Choose a vendor from the list")
+    digits = "".join(ch for ch in req.po_number if ch.isdigit())
+    po_number = f"PO-{digits}" if digits else next_po_number()["po_number"]
+    if po_number in ref["pos"]:
+        raise HTTPException(400, f"{po_number} already exists")
+    lines = [l for l in req.lines if l.description.strip()]
+    if not lines:
+        raise HTTPException(400, "Add at least one line")
+    for l in lines:
+        if l.qty <= 0 or l.unit_price < 0 or l.received < 0:
+            raise HTTPException(400, f"Check the numbers on \"{l.description}\"")
+        if l.received > l.qty:
+            raise HTTPException(400, f"\"{l.description}\": received cannot be more than ordered")
+    today = store.today().isoformat()
+    added = store.load_added()
+    added["pos"].append({"po_number": po_number, "vendor_id": vendor["vendor_id"], "po_date": req.po_date or today,
+                         "currency": (req.currency or vendor.get("currency") or "USD").upper(), "status": "open",
+                         "buyer": req.buyer.strip() or "AP team"})
+    grn = f"GRN-{9000 + len(added['receipts']) + 1}"
+    for i, l in enumerate(lines, 1):
+        line_type = "service" if l.line_type == "service" else "goods"
+        added["lines"].append({"po_number": po_number, "line_no": i, "description": l.description.strip(),
+                               "qty": l.qty, "unit_price": l.unit_price, "line_type": line_type})
+        if line_type == "goods" and l.received > 0:
+            added["receipts"].append({"grn_number": grn, "po_number": po_number, "line_no": i,
+                                      "qty_received": l.received, "received_date": today})
+    store.save_added(added)
+    return {"po_number": po_number}
+
+
+@app.delete("/api/pos/{po_number}")
+def delete_po(po_number: str):
+    added = store.load_added()
+    if not any(p["po_number"] == po_number for p in added["pos"]):
+        raise HTTPException(400, "Only purchase orders added in the app can be removed")
+    added["pos"] = [p for p in added["pos"] if p["po_number"] != po_number]
+    added["lines"] = [l for l in added["lines"] if l["po_number"] != po_number]
+    added["receipts"] = [g for g in added["receipts"] if g["po_number"] != po_number]
+    store.save_added(added)
+    return {"ok": True}
+
+
+@app.delete("/api/vendors/{vendor_id}")
+def delete_vendor(vendor_id: str):
+    added = store.load_added()
+    if not any(v["vendor_id"] == vendor_id for v in added["vendors"]):
+        raise HTTPException(400, "Only vendors added in the app can be removed")
+    if any(p["vendor_id"] == vendor_id for p in added["pos"]):
+        raise HTTPException(400, "Remove this vendor's purchase orders first")
+    added["vendors"] = [v for v in added["vendors"] if v["vendor_id"] != vendor_id]
+    store.save_added(added)
+    return {"ok": True}
+
+
 @app.post("/api/simulate")
 def simulate(body: dict):
     return pipeline.simulate(body)
@@ -329,6 +468,7 @@ def reference():
             lines.append({**l, "billed": billed.get(l["line_no"], 0), "received": recv})
         billed_value = sum(l["billed"] * l["unit_price"] for l in lines)
         out.append({**{k: po[k] for k in ("po_number", "vendor_id", "po_date", "currency", "status", "buyer", "total")},
+                    "added": bool(po.get("added")),
                     "vendor_name": ref["vendors"][po["vendor_id"]]["name"], "lines": lines,
                     "billed_value": round(billed_value, 2),
                     "pct": round(billed_value / po["total"] * 100, 1) if po["total"] else 0})

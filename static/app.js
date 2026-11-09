@@ -509,8 +509,10 @@ function renderRun(run, open) {
   const sig = decided && dec && dec.data ? run.id + "|" + (dec.data.why || "") + "|" + ((run.meta || {}).timeline || []).length + "|" + !!run.review : "pending";
   if (after.dataset.sig !== sig) {
     after.dataset.sig = sig;
-    after.innerHTML = decided && dec && dec.data && dec.data.audit ? auditPanel(dec.data) + extractedPanel(run, dec.data) + timelinePanel(run) : "";
+    after.innerHTML = decided && dec && dec.data && dec.data.audit ? setupCallout(run) + auditPanel(dec.data) + extractedPanel(run, dec.data) + timelinePanel(run) : "";
     if (decided) bindExtracted(run);
+    const sb = $("#setup-btn");
+    if (sb) sb.addEventListener("click", () => openSetupWizard(run));
   }
 }
 
@@ -657,25 +659,189 @@ document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeDrawe
 
 /* ------------------------------------------------------------------ purchase orders */
 async function viewPOs() {
-  app.innerHTML = `<div class="page-head"><div><h1 class="page-title">Purchase order tracker</h1>
-    <p class="lede">How much of each PO has been billed (ledger plus invoices approved here) and how much has been delivered. This is what the split-invoice and partial-delivery checks compare against.</p></div></div>
-    <div class="po-grid" id="pos"></div>`;
-  const { pos } = await api("/api/reference");
-  $("#pos").innerHTML = pos.map((p) => {
+  app.innerHTML = `<div class="page-head"><div><h1 class="page-title">Vendors and purchase orders</h1>
+    <p class="lede">The records every invoice is checked against. Add a supplier and its PO here before processing its invoices, or set them up straight from an invoice that was rejected for a missing vendor or PO.</p></div>
+    <div class="row"><button class="btn secondary" id="add-vendor">Add vendor</button><button class="btn" id="add-po">Add purchase order</button></div></div>
+    <div class="seg-tabs" role="tablist" style="margin-bottom:16px"><button class="on" data-ptab="pos">Purchase orders</button><button data-ptab="vendors">Vendors</button></div>
+    <div data-ppane="pos"><div class="po-grid" id="pos"></div></div>
+    <div data-ppane="vendors" hidden><section class="panel" id="vendors"></section></div>`;
+  const ref = await api("/api/reference");
+  const { pos, vendors } = ref;
+  document.querySelectorAll("[data-ptab]").forEach((b) => b.addEventListener("click", () => {
+    document.querySelectorAll("[data-ptab]").forEach((x) => x.classList.toggle("on", x === b));
+    document.querySelectorAll("[data-ppane]").forEach((p) => (p.hidden = p.dataset.ppane !== b.dataset.ptab));
+  }));
+  $("#add-vendor").addEventListener("click", () => openVendorForm({}, viewPOs));
+  $("#add-po").addEventListener("click", () => openPOForm({}, viewPOs));
+  const addedChip = '<span class="chip">Added here</span>';
+  $("#pos").innerHTML = pos.slice().sort((a, b) => (b.added === a.added ? 0 : b.added ? 1 : -1)).map((p) => {
     const cls = p.status !== "open" ? "" : p.pct > 100.01 ? "bad" : p.pct >= 90 ? "warn" : "ok";
     return `<section class="panel po-card ${p.status !== "open" ? "closed" : ""}">
-      <div class="attn-top"><div><div class="attn-title">${esc(p.po_number)} · ${esc(p.vendor_name)}</div>
+      <div class="attn-top"><div><div class="attn-title">${esc(p.po_number)} · ${esc(p.vendor_name)} ${p.added ? addedChip : ""}</div>
         <div class="cell-sub">Raised ${fmtDate(p.po_date)} by ${esc(p.buyer)} · ${esc(p.currency)}</div></div>
-        <span class="pill ${p.status === "open" ? "ok" : "idle"}">${p.status === "open" ? "Open" : "Closed"}</span></div>
+        <span class="row">${p.added ? `<button class="btn sm danger" data-del-po="${esc(p.po_number)}">Remove</button>` : ""}<span class="pill ${p.status === "open" ? "ok" : "idle"}">${p.status === "open" ? "Open" : "Closed"}</span></span></div>
       <div class="meter ${cls}"><div class="meter-top"><span>Billed</span><span class="pct">${p.pct}%</span></div>
         <div class="bar"><span class="now" style="width:${Math.min(100, p.pct)}%"></span></div>
-        <div class="meter-scale"><span>${money(p.billed_value, p.currency)}</span><span>${money(p.total, p.currency)}</span></div></div>
+        <div class="meter-scale"><span>${money(p.billed_value, p.currency)} billed</span><span>${money(Math.max(p.total - p.billed_value, 0), p.currency)} left of ${money(p.total, p.currency)}</span></div></div>
       <div class="table-wrap"><table class="mini"><thead><tr><th>Line</th><th class="num">Ordered</th><th class="num">Received</th><th class="num">Billed</th><th class="num">Unit price</th></tr></thead>
         <tbody>${p.lines.map((l) => `<tr><td>${esc(l.description)}${l.line_type === "service" ? ' <span class="cell-sub">service</span>' : ""}</td>
           <td class="num">${l.qty}</td><td class="num">${l.line_type === "service" ? "-" : l.received}</td>
           <td class="num" style="${l.billed > l.qty ? "color:var(--bad);font-weight:700" : ""}">${l.billed}</td><td class="num">${money(l.unit_price, p.currency)}</td></tr>`).join("")}</tbody></table></div>
     </section>`;
   }).join("");
+  $("#vendors").innerHTML = `<div class="table-wrap"><table><thead><tr><th>Vendor</th><th>Tax ID</th><th>Bank account</th><th>Terms</th><th>Status</th><th></th></tr></thead><tbody>
+    ${vendors.slice().sort((a, b) => (b.added === a.added ? a.vendor_id.localeCompare(b.vendor_id) : b.added ? 1 : -1)).map((v) => `<tr>
+      <td><div class="cell-main">${esc(v.name)} ${v.added ? addedChip : ""}</div><div class="cell-sub">${esc(v.vendor_id)}${v.contact_email ? " · " + esc(v.contact_email) : ""}</div></td>
+      <td class="num">${esc(v.tax_id || "-")}</td><td class="num">${v.bank_account ? "ending " + esc(String(v.bank_account).slice(-4)) : "-"}</td>
+      <td>${esc(v.payment_terms_days)} days</td><td><span class="pill ${v.status === "active" ? "ok" : "bad"}">${esc(v.status)}</span></td>
+      <td>${v.added ? `<button class="btn sm danger" data-del-vendor="${esc(v.vendor_id)}">Remove</button>` : ""}</td></tr>`).join("")}</tbody></table></div>`;
+  document.querySelectorAll("[data-del-po]").forEach((b) => b.addEventListener("click", async () => {
+    try { await api(`/api/pos/${encodeURIComponent(b.dataset.delPo)}`, { method: "DELETE" }); toast(`${b.dataset.delPo} removed`); viewPOs(); } catch (e) { toast(e.message); }
+  }));
+  document.querySelectorAll("[data-del-vendor]").forEach((b) => b.addEventListener("click", async () => {
+    try { await api(`/api/vendors/${encodeURIComponent(b.dataset.delVendor)}`, { method: "DELETE" }); toast("Vendor removed"); viewPOs(); } catch (e) { toast(e.message); }
+  }));
+}
+
+/* ------------------------------------------------------------------ add vendor / PO forms (in the side panel) */
+const fieldRow = (id, label, value = "", attrs = "") => `<label class="form-row" for="${id}"><span>${label}</span><input class="field" id="${id}" value="${esc(value)}" ${attrs}></label>`;
+
+function vendorFields(v = {}) {
+  return `<div class="form-grid">
+    ${fieldRow("v-name", "Vendor name *", v.name, 'required autocomplete="off"')}
+    ${fieldRow("v-tax", "Tax ID", v.tax_id)}
+    ${fieldRow("v-bank", "Bank account", v.bank_account)}
+    ${fieldRow("v-routing", "Routing / BIC", v.bank_routing)}
+    ${fieldRow("v-cur", "Currency", v.currency || "USD")}
+    ${fieldRow("v-terms", "Payment terms (days)", v.payment_terms_days || 30, 'type="number" min="0"')}
+    ${fieldRow("v-email", "Contact email", v.contact_email)}
+    ${fieldRow("v-phone", "Phone", v.phone)}
+  </div>`;
+}
+const readVendor = () => ({
+  name: $("#v-name").value, tax_id: $("#v-tax").value, bank_account: $("#v-bank").value, bank_routing: $("#v-routing").value,
+  currency: $("#v-cur").value, payment_terms_days: Number($("#v-terms").value || 30), contact_email: $("#v-email").value, phone: $("#v-phone").value,
+});
+
+function lineRow(l = {}) {
+  const type = l.line_type || "goods";
+  return `<tr class="po-line">
+    <td><input class="field" data-l="description" value="${esc(l.description || "")}" placeholder="What was ordered" aria-label="Description"></td>
+    <td><input class="field num" data-l="qty" type="number" min="0" step="any" value="${l.qty ?? 1}" aria-label="Quantity"></td>
+    <td><input class="field num" data-l="unit_price" type="number" min="0" step="any" value="${l.unit_price ?? ""}" aria-label="Unit price"></td>
+    <td><select class="field" data-l="line_type" aria-label="Type"><option value="goods" ${type === "goods" ? "selected" : ""}>Goods</option><option value="service" ${type === "service" ? "selected" : ""}>Service</option></select></td>
+    <td><input class="field num" data-l="received" type="number" min="0" step="any" value="${l.received ?? l.qty ?? 0}" aria-label="Received" ${type === "service" ? "disabled" : ""}></td>
+    <td><button type="button" class="icon-btn" data-rm aria-label="Remove line">✕</button></td></tr>`;
+}
+function poFields(po = {}, vendors = [], fixedVendorLabel = null) {
+  return `<div class="form-grid">
+    ${fieldRow("p-num", "PO number", po.po_number)}
+    <label class="form-row" for="p-vendor"><span>Vendor *</span>${fixedVendorLabel ? `<input class="field" id="p-vendor" value="${esc(fixedVendorLabel)}" disabled>` :
+      `<select class="field" id="p-vendor">${vendors.map((v) => `<option value="${esc(v.vendor_id)}" ${v.vendor_id === po.vendor_id ? "selected" : ""}>${esc(v.name)}</option>`).join("")}</select>`}</label>
+    ${fieldRow("p-date", "PO date", po.po_date || "", 'type="date"')}
+    ${fieldRow("p-buyer", "Buyer", po.buyer || "")}
+  </div>
+  <div class="eyebrow" style="margin:16px 0 8px">Lines</div>
+  <div class="table-wrap"><table class="mini po-lines"><thead><tr><th>Description</th><th class="num">Qty</th><th class="num">Unit price</th><th>Type</th><th class="num">Received</th><th></th></tr></thead>
+    <tbody id="p-lines">${(po.lines && po.lines.length ? po.lines : [{}]).map(lineRow).join("")}</tbody></table></div>
+  <button type="button" class="btn sm secondary" id="p-add-line" style="margin-top:10px">+ Add line</button>
+  <p class="muted" style="font-size:13px;margin:8px 0 0">"Received" is what the warehouse has taken in. Services need no receipt.</p>`;
+}
+function bindLines() {
+  const tb = $("#p-lines");
+  const wire = (tr) => {
+    tr.querySelector("[data-rm]").addEventListener("click", () => { if (tb.children.length > 1) tr.remove(); });
+    tr.querySelector('[data-l="line_type"]').addEventListener("change", (e) => { tr.querySelector('[data-l="received"]').disabled = e.target.value === "service"; });
+  };
+  [...tb.children].forEach(wire);
+  $("#p-add-line").addEventListener("click", () => { tb.insertAdjacentHTML("beforeend", lineRow({})); wire(tb.lastElementChild); });
+}
+const readLines = () => [...document.querySelectorAll("#p-lines .po-line")].map((tr) => {
+  const g = (k) => tr.querySelector(`[data-l="${k}"]`);
+  return { description: g("description").value, qty: Number(g("qty").value || 0), unit_price: Number(g("unit_price").value || 0),
+    line_type: g("line_type").value, received: g("line_type").value === "service" ? 0 : Number(g("received").value || 0) };
+});
+function openPanel(html) {
+  $("#drawer").hidden = false;
+  $("#drawer-body").innerHTML = html;
+}
+
+function openVendorForm(prefill, done) {
+  openPanel(`<h2 class="drawer-title">Add vendor</h2><p class="muted" style="margin:0">Invoices are matched to vendors by tax ID first, then by name. The bank account must match the one printed on invoices, or they are stopped as a possible fraud.</p>
+    <form id="vendor-form" class="stack" style="gap:14px">${vendorFields(prefill)}<div class="form-err" id="form-err" hidden></div>
+    <div class="row"><button class="btn" type="submit">Save vendor</button><button class="btn secondary" type="button" data-close-form>Cancel</button></div></form>`);
+  $("[data-close-form]").addEventListener("click", closeDrawer);
+  $("#vendor-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    try { const v = await api("/api/vendors", { method: "POST", body: JSON.stringify(readVendor()) }); toast(`${v.name} added as ${v.vendor_id}`); closeDrawer(); done && done(v); }
+    catch (err) { $("#form-err").textContent = err.message; $("#form-err").hidden = false; }
+  });
+}
+
+async function openPOForm(prefill, done) {
+  const [{ vendors }, next] = await Promise.all([api("/api/reference"), api("/api/pos/next-number")]);
+  const active = vendors.filter((v) => v.status === "active");
+  openPanel(`<h2 class="drawer-title">Add purchase order</h2><p class="muted" style="margin:0">Invoices are checked line by line against these quantities and prices.</p>
+    <form id="po-form" class="stack" style="gap:6px">${poFields({ po_number: next.po_number, ...prefill }, active)}<div class="form-err" id="form-err" hidden></div>
+    <div class="row" style="margin-top:14px"><button class="btn" type="submit">Save purchase order</button><button class="btn secondary" type="button" data-close-form>Cancel</button></div></form>`);
+  $("[data-close-form]").addEventListener("click", closeDrawer);
+  bindLines();
+  $("#po-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    try {
+      const r = await api("/api/pos", { method: "POST", body: JSON.stringify({ po_number: $("#p-num").value, vendor_id: $("#p-vendor").value,
+        po_date: $("#p-date").value, buyer: $("#p-buyer").value, lines: readLines() }) });
+      toast(`${r.po_number} added`); closeDrawer(); done && done(r);
+    } catch (err) { $("#form-err").textContent = err.message; $("#form-err").hidden = false; }
+  });
+}
+
+/* Set up vendor and PO straight from an invoice that was stopped because they are not on file. */
+const SETUP_CODES = ["unknown_vendor", "no_po", "po_conflict"];
+function setupCallout(run) {
+  const codes = ((run.result || {}).issues || []).map((i) => i.code);
+  if (!codes.some((c) => SETUP_CODES.includes(c)) || run.review) return "";
+  const msg = codes.includes("unknown_vendor") ? "This supplier is not in the vendor list, so the invoice could not be matched or paid."
+    : "No matching purchase order was found for this invoice.";
+  return `<section class="panel setup-callout"><div style="min-width:0"><b>Expected this invoice?</b><div class="muted">${msg} If the purchase is genuine, set up the missing records from what was read on the invoice, then check it again.</div></div>
+    <button class="btn" id="setup-btn">Set up from this invoice</button></section>`;
+}
+async function openSetupWizard(run) {
+  const dec = ((run.stages || []).find((s) => s.id === "decide") || {}).data || {};
+  const ext = ((run.stages || []).find((s) => s.id === "extract") || {}).data || {};
+  const F = Object.fromEntries((dec.fields || []).map((f) => [f.key, f.value]));
+  const raw = ext.fields || {};
+  const [{ vendors, pos }, next] = await Promise.all([api("/api/reference"), api("/api/pos/next-number")]);
+  const norm = (x) => String(x || "").replace(/[^A-Z0-9]/gi, "").toUpperCase();
+  const known = vendors.find((v) => (F.vendor_tax_id && norm(v.tax_id) === norm(F.vendor_tax_id)) || v.name.toLowerCase() === String(F.vendor_name || "").toLowerCase());
+  const poExists = F.po_number && pos.some((p) => p.po_number === F.po_number);
+  const tax = raw.tax_inclusive && F.total && F.tax_amount ? (F.total - F.tax_amount) / F.total : 1;
+  const lines = (raw.line_items || []).map((l) => ({ description: l.description, qty: Math.abs(l.qty), unit_price: Math.round(Math.abs(l.unit_price) * tax * 100) / 100, line_type: "goods", received: Math.abs(l.qty) }));
+  const poPrefill = { po_number: F.po_number && !poExists ? F.po_number : next.po_number, po_date: F.invoice_date || "", lines };
+  openPanel(`<h2 class="drawer-title">Set up from this invoice</h2>
+    <p class="muted" style="margin:0">Filled in from what was read on ${esc(run.filename)}. Check every value against your own records before saving. Anything created here is marked "Added here" and can be removed.</p>
+    <form id="setup-form" class="stack" style="gap:6px">
+      ${known ? `<div class="detail-rows"><div><span>Vendor</span><span>${esc(known.name)} (${esc(known.vendor_id)}) is already on file</span></div></div>`
+        : `<div class="eyebrow" style="margin-top:12px">1. New vendor</div>${vendorFields({ name: F.vendor_name, tax_id: F.vendor_tax_id, bank_account: F.bank_account, bank_routing: raw.bank_routing, currency: F.currency || "USD" })}`}
+      ${poExists ? `<div class="detail-rows"><div><span>Purchase order</span><span>${esc(F.po_number)} is already on file</span></div></div>`
+        : `<div class="eyebrow" style="margin-top:16px">${known ? "1" : "2"}. New purchase order</div>${poFields(poPrefill, vendors, known ? known.name : "The new vendor above")}`}
+      <div class="form-err" id="form-err" hidden></div>
+      <div class="row" style="margin-top:14px"><button class="btn" type="submit">Save and check again</button><button class="btn secondary" type="button" data-close-form>Cancel</button></div>
+    </form>`);
+  $("[data-close-form]").addEventListener("click", closeDrawer);
+  if (!poExists) bindLines();
+  $("#setup-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const err = $("#form-err");
+    try {
+      let vendorId = known ? known.vendor_id : null;
+      if (!known) vendorId = (await api("/api/vendors", { method: "POST", body: JSON.stringify(readVendor()) })).vendor_id;
+      if (!poExists) await api("/api/pos", { method: "POST", body: JSON.stringify({ po_number: $("#p-num").value, vendor_id: vendorId,
+        po_date: $("#p-date").value, buyer: $("#p-buyer").value, lines: readLines() }) });
+      await api(`/api/runs/${run.id}/recheck`, { method: "POST" });
+      closeDrawer(); toast("Saved. Checking the invoice again"); showRun(run.id);
+    } catch (ex) { err.textContent = ex.message + (known ? "" : " (if the vendor was already saved, it is now in the list; reopen this form)"); err.hidden = false; }
+  });
 }
 
 /* ------------------------------------------------------------------ rules */
@@ -694,7 +860,7 @@ async function viewRules() {
           <li><span class="n">O</span><span><b>Override</b><span class="muted">A reviewer can approve or reject an invoice that needs review. A note is required and kept in the audit trail.</span></span></li>
         </ol></section>
       <section class="panel panel-pad"><h2 class="section-title">Demo data</h2>
-        <p class="lede" style="margin-bottom:14px">Clears processed invoices, uploaded files and threshold changes. Vendors, POs, goods receipts and the invoice ledger stay.</p>
+        <p class="lede" style="margin-bottom:14px">Clears processed invoices, uploaded files, threshold changes and any vendors or POs added in the app. The built-in demo vendors, POs, goods receipts and invoice ledger stay.</p>
         <div id="reset-area"><button class="btn danger" id="reset">Reset demo data</button></div></section>
     </div>`;
   const rules = await api("/api/rules");

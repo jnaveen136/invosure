@@ -15,6 +15,7 @@ STORAGE = Path(os.environ.get("STORAGE_DIR", ROOT / "storage"))
 UPLOADS = STORAGE / "uploads"
 DB_PATH = STORAGE / "runs.db"
 RULES_PATH = STORAGE / "rules.json"
+ADDED_PATH = STORAGE / "added.json"  # vendors and POs added from the app (kept apart from the demo CSVs)
 STORAGE.mkdir(parents=True, exist_ok=True)
 UPLOADS.mkdir(parents=True, exist_ok=True)
 
@@ -65,17 +66,36 @@ def _csv(name):
         return list(csv.DictReader(f))
 
 
+def load_added() -> dict:
+    empty = {"vendors": [], "pos": [], "lines": [], "receipts": []}
+    if ADDED_PATH.exists():
+        try:
+            return {**empty, **json.loads(ADDED_PATH.read_text())}
+        except ValueError:
+            return empty
+    return empty
+
+
+def save_added(data: dict):
+    ADDED_PATH.write_text(json.dumps(data, indent=2))
+
+
 def reference() -> dict:
+    added = load_added()
     vendors = {r["vendor_id"]: r for r in _csv("vendors.csv")}
+    for v in added["vendors"]:
+        vendors[v["vendor_id"]] = {**v, "added": True}
     pos = {r["po_number"]: {**r, "lines": []} for r in _csv("purchase_orders.csv")}
-    for ln in _csv("po_lines.csv"):
+    for p in added["pos"]:
+        pos[p["po_number"]] = {**p, "lines": [], "added": True}
+    for ln in _csv("po_lines.csv") + [dict(x) for x in added["lines"]]:
         ln["qty"] = float(ln["qty"])
         ln["unit_price"] = float(ln["unit_price"])
         ln["line_no"] = int(ln["line_no"])
         pos[ln["po_number"]]["lines"].append(ln)
     for p in pos.values():
         p["total"] = round(sum(l["qty"] * l["unit_price"] for l in p["lines"]), 2)
-    receipts = _csv("goods_receipts.csv")
+    receipts = _csv("goods_receipts.csv") + [dict(x) for x in added["receipts"]]
     for r in receipts:
         r["line_no"] = int(r["line_no"])
         r["qty_received"] = float(r["qty_received"])
@@ -150,3 +170,5 @@ def reset_runs():
         f.unlink()
     if RULES_PATH.exists():
         RULES_PATH.unlink()
+    if ADDED_PATH.exists():  # vendors and POs added in the app
+        ADDED_PATH.unlink()

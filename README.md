@@ -42,6 +42,7 @@ Hugging Face Spaces (Docker SDK, set `PORT=7860`) and Railway work the same way.
 - **Extracted data:** every field with its confidence and the reason for it, for example "Cross-checked: lines + tax = total" or "Not printed; worked out from the lines and amount". Edit any field and re-run every check on the corrected values. Also shown as a Table and JSON.
 - **Invoice timeline:** a timestamped record of everything that happened, including corrections and reviewer decisions.
 - **Same-time processing:** only one invoice at a time may read the billing history and record its decision. Two $15,000 invoices against a PO with $20,000 left, sent together: one is approved, the other rejected. Use the "Run both at the same time" button.
+- **Vendors and POs:** add a vendor or a purchase order (with lines and received quantities) from the "Vendors and POs" page. When an invoice is rejected because its supplier or PO is not on file, click **"Set up from this invoice"**: the forms are pre-filled from what was read, and one click saves them and checks the invoice again. Records added in the app are marked "Added here", can be removed, and are cleared by "Reset demo data".
 - **Rule simulation:** change a threshold on the Rules page and click "Simulate before saving". Every processed invoice is re-decided in the order it arrived, and the page shows which decisions would change, for example "With these rules, 1 more invoice would have been approved automatically".
 
 ## How it works
@@ -116,4 +117,5 @@ Reference data lives in `data/` as CSV files: vendors, POs and PO lines, goods r
 5. **15:** partial delivery, needs review. Read Why, Evidence and Uncertain.
 6. **17:** missing number and date. Click "Fix manually", type them in, re-run, and it becomes Approved. The timeline records the correction.
 7. **Rules:** set price tolerance to 10% and $500, click "Simulate before saving", and show that invoice 26 would now be approved. Don't save.
-8. **Overview:** the dashboard now reflects everything you ran.
+8. **Your own invoice:** upload any invoice PDF. It is rejected as an unknown vendor. Click "Set up from this invoice", check the values, save, and it is checked again.
+9. **Overview:** the dashboard now reflects everything you ran.
