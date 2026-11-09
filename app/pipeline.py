@@ -21,9 +21,12 @@ Outcomes:
 """
 from __future__ import annotations
 
+import copy
 import hashlib
 import re
+import threading
 import time
+from datetime import datetime
 import traceback
 from datetime import date, timedelta
 
@@ -82,14 +85,54 @@ def chk(label, status, detail=""):
     return {"label": label, "status": status, "detail": detail}
 
 
+# Only one invoice at a time may read the billing history and record its decision. Without this,
+# two invoices for the same PO arriving together could each see "$20,000 left" and both be approved.
+DECISION_LOCK = threading.Lock()
+
+EDITABLE_FIELDS = [
+    ("vendor_name", "Vendor", "text"), ("vendor_tax_id", "Vendor tax ID", "text"),
+    ("invoice_number", "Invoice number", "text"), ("invoice_date", "Invoice date", "date"),
+    ("due_date", "Due date", "date"), ("po_number", "PO number", "text"), ("currency", "Currency", "text"),
+    ("subtotal", "Subtotal", "amount"), ("tax_amount", "Tax", "amount"), ("total", "Total", "amount"),
+    ("bank_account", "Bank account", "text"),
+]
+
+
+def coerce_field(key, value):
+    """Turn a value typed by a reviewer into the same shape the extractor produces."""
+    kind = dict((k, t) for k, _, t in EDITABLE_FIELDS).get(key)
+    if value in (None, ""):
+        return None
+    v = str(value).strip()
+    if kind == "amount":
+        return extract.parse_amount(v)
+    if kind == "date":
+        return extract.parse_date(v)[0]
+    if key == "po_number":
+        d = re.sub(r"\D", "", v)
+        return f"PO-{d}" if d else None
+    if key in ("invoice_number", "currency"):
+        return v.upper()
+    if key == "bank_account":
+        return extract.norm_account(v)
+    return v
+
+
 class Ctx:
-    def __init__(self, run):
+    def __init__(self, run, history=None, rules=None, sim=False):
         self.run = run
+        self.sim = sim
+        meta = run.get("meta") or {}
+        self.overrides = meta.get("overrides") or {}
+        self.snapshot = meta.get("extracted") if meta.get("reuse") or sim else None
+        self.corrected: list[str] = []
+        self.vendor_how = None
+        self.po_basis = None
         self.path = run["file_path"]
         self.filename = run["filename"]
         self.file_hash = run.get("file_hash")
         self.ref = store.reference()
-        self.rules = store.load_rules()
+        self.rules = rules or store.load_rules()
         self.today = store.today()
         self.issues: list[dict] = []
         self.f: dict = {}
@@ -100,7 +143,17 @@ class Ctx:
         self.uncertain: list[str] = []
         self.low_confidence = False
         self.extractor = "Built-in parser"
-        self.history = [r for r in store.list_runs() if r["id"] != run["id"] and r["status"] == "done"]
+        self.history = history if history is not None else self.load_history()
+
+    def load_history(self):
+        return [r for r in store.list_runs() if r["id"] != self.run["id"] and r["status"] == "done"]
+
+    def event(self, text, kind="info"):
+        if self.sim:
+            return
+        meta = self.run.setdefault("meta", {}) or {}
+        self.run["meta"] = meta
+        meta.setdefault("timeline", []).append({"at": datetime.now().isoformat(timespec="seconds"), "text": text, "kind": kind})
 
     def issue(self, code, severity, route, message, source, ask_vendor=None):
         self.issues.append({"code": code, "severity": severity, "route": route, "message": message,
@@ -129,6 +182,10 @@ def key_result(outcome, verdict, evidence, uncertain, checks, data=None):
 
 
 def s_read(c: Ctx):
+    if c.snapshot:
+        c.doc = dict(c.snapshot["doc"])
+        return {"summary": "Reused the reading from the first run", "checks": [chk("Document", "pass", "Already read; re-checking with corrections")],
+                "data": {"method": c.doc["method"], "text": c.doc.get("text", "")}}
     raw = open(c.path, "rb").read()
     checks = [chk("File received", "pass", f"{c.filename} ({len(raw) / 1024:.0f} KB)")]
     if not raw.startswith(b"%PDF"):
@@ -138,6 +195,11 @@ def s_read(c: Ctx):
         raise StopPipeline({"summary": "Not a PDF", "checks": checks})
     try:
         doc = extract.read_document(c.path)
+    except RuntimeError as e:  # OCR took too long
+        checks.append(chk("Scan read in time", "fail", str(e)[:120]))
+        c.issue("ocr_timeout", "review", "ap", "The scanned invoice took too long to read. A person should key in the figures.",
+                "Missing or conflicting information")
+        raise StopPipeline({"summary": "Scan took too long to read", "checks": checks})
     except Exception as e:
         checks.append(chk("PDF can be opened", "fail", f"{e.__class__.__name__}"))
         c.issue("unreadable", "reject", "ap", "The PDF is damaged or protected and cannot be read.", "Standard checks",
@@ -157,7 +219,10 @@ def s_read(c: Ctx):
 
 def s_extract(c: Ctx):
     checks, result = [], None
-    if extract.claude_available():
+    if c.snapshot:
+        result = copy.deepcopy({"fields": c.snapshot["fields"], "notes": c.snapshot["notes"]})
+        c.extractor = c.snapshot.get("extractor", c.extractor)
+    elif extract.claude_available():
         try:
             result = extract.extract_with_claude(c.path)
             c.extractor = f"Claude ({extract.CLAUDE_MODEL})"
@@ -165,8 +230,18 @@ def s_extract(c: Ctx):
             checks.append(chk("Claude extraction", "warn", f"Unavailable ({e.__class__.__name__}); used the built-in parser"))
     if result is None:
         result = extract.parse_text(c.doc["text"], ocr=c.doc["method"] == "ocr")
+    if not c.snapshot and not c.sim:  # keep what was read, so corrections and simulations can re-check without re-reading
+        c.run.setdefault("meta", {})["extracted"] = copy.deepcopy({
+            "fields": result["fields"], "notes": result["notes"], "extractor": c.extractor,
+            "doc": {k: c.doc.get(k) for k in ("method", "ocr_quality", "stamp", "pages")} | {"text": c.doc.get("text", "")[:4000]}})
     c.f = f = result["fields"]
     c.extract_notes = result["notes"]
+    for key, value in c.overrides.items():
+        f[key] = coerce_field(key, value)
+        c.corrected.append(key)
+    if c.corrected:
+        names = ", ".join(lbl.lower() for k, lbl, _ in EDITABLE_FIELDS if k in c.corrected)
+        checks.append(chk("Corrected by a reviewer", "pass", names))
     labels = [("vendor_name", "Vendor"), ("invoice_number", "Invoice number"), ("invoice_date", "Invoice date"),
               ("po_number", "PO reference"), ("total", "Total")]
     for key, label in labels:
@@ -293,6 +368,7 @@ def s_info(c: Ctx):
     # Vendor identity ------------------------------------------------------------
     vendor, how, conflict = resolve_vendor(c)
     c.vendor = vendor
+    c.vendor_how = how
     if conflict:
         checks.append(chk("Vendor identity is consistent", "fail", conflict))
         review.append(conflict)
@@ -317,10 +393,12 @@ def s_info(c: Ctx):
             msg = f"{printed} is printed, but the invoice lines do not match it ({fit:.0f}% match)" + (f"; they match {alt['po_number']} instead." if alt else ".")
             checks.append(chk("PO reference matches the invoice", "fail", msg))
             review.append(msg)
+            c.po_basis = "conflict"
             c.issue("po_conflict", "review", "procurement", msg + " Confirm the correct PO with the buyer.", "Missing or conflicting information",
                     ask_vendor="confirmation of the purchase order this invoice relates to")
         else:
             checks.append(chk("PO reference matches the invoice", "pass", f"{printed} is printed and belongs to {vendor['name']}"))
+            c.po_basis = "printed"
             evidence.append(f"{printed} is printed on the invoice and was issued to {vendor['name']} on {nice_date(po['po_date'])}.")
     else:
         alt, why = infer_po(c)
@@ -338,12 +416,14 @@ def s_info(c: Ctx):
                 uncertain.append(f"Checks below were run against {alt['po_number']}, the PO the lines match, not the printed {printed}.")
             checks.append(chk("PO reference matches the invoice", "fail", msg))
             review.append(msg)
+            c.po_basis = "conflict"
             c.issue("po_conflict", "review", "procurement", msg + " Buyer to confirm the correct PO before it is matched.",
                     "Missing or conflicting information", ask_vendor="confirmation of the purchase order number this invoice relates to")
         elif alt:
             c.po = alt
             f["po_number"] = alt["po_number"]
             checks.append(chk("PO reference", "warn", f"Not printed. Matched to {alt['po_number']}"))
+            c.po_basis = "inferred"
             evidence.append(f"No PO number was printed. {why}.")
             uncertain.append(f"The PO was inferred, not printed. The match to {alt['po_number']} is unambiguous, but the vendor did not state it.")
         else:
@@ -369,7 +449,11 @@ def s_info(c: Ctx):
         else:
             checks.append(chk("Scan is readable", "pass", f"OCR confidence {q:.0f}%"))
             uncertain.append(f"Values were read from a scanned image ({q:.0f}% OCR confidence), not from digital text.")
+    us_vendor = bool(c.vendor and re.fullmatch(r"\d{2}-\d{7}", c.vendor["tax_id"]))
     for n in c.extract_notes:
+        if n.startswith("Slash date") and us_vendor:
+            evidence.append("Dates like 11/05/2026 were read as month/day, the US format this vendor uses.")
+            continue
         uncertain.append(n + ".")
 
     c.uncertain += uncertain
@@ -791,6 +875,7 @@ def s_delivery(c: Ctx):
 
 def s_decide(c: Ctx, stages):
     f, cur = c.f, c.cur()
+    fields, overall = field_confidence(c) if c.f else ([], 0)
     is_credit = c.is_credit()
     rank = {"Duplicate invoices": 0, "Split invoices": 1, "Partial delivery": 2, "Missing or conflicting information": 3}
     ordered = sorted(c.issues, key=lambda i: rank.get(i["source"], 4))
@@ -911,7 +996,104 @@ def s_decide(c: Ctx, stages):
         "route": ", ".join(dict.fromkeys(ROUTES[i["route"]] for i in blocking)) if blocking else ("AP clerk" if is_credit else "Payment run"),
         "next_steps": next_steps,
         "vendor_message": vendor_message,
+        "fields": fields,
+        "extraction_confidence": overall,
+        "audit": audit_report(c, stages, status),
+        "editable": [{"key": k, "label": l, "type": t} for k, l, t in EDITABLE_FIELDS],
     }
+
+# =========================================================================== field confidence + audit report
+
+
+def field_confidence(c: Ctx):
+    """How sure we are of each extracted value, and why. Read quality and cross-checks both count."""
+    f = c.f
+    ocr = c.doc.get("method") == "ocr"
+    q = min(1.0, (c.doc.get("ocr_quality") or 0) / 100 + 0.05) if ocr else 1.0
+    base = 0.95 if c.extractor.startswith("Claude") else 0.97
+    amounts_conflict = any(i["code"] == "totals_conflict" for i in c.issues)
+    us_vendor = bool(c.vendor and re.fullmatch(r"\d{2}-\d{7}", c.vendor["tax_id"]))
+    acct_file = extract.norm_account(c.vendor["bank_account"]) if c.vendor else None
+    out = []
+    for key, label, _ in EDITABLE_FIELDS:
+        v = f.get(key)
+        if key in c.corrected:
+            conf, basis = 1.0, "Entered by a reviewer"
+        elif v in (None, ""):
+            conf, basis = 0.0, "Not found on the invoice"
+        elif key == "vendor_name":
+            if c.vendor_how == "tax ID":
+                conf, basis = 0.99, "Matches the vendor master by tax ID"
+            elif c.vendor_how:
+                pct = float(re.findall(r"\d+", c.vendor_how)[0]) / 100 if re.findall(r"\d+", c.vendor_how) else 0.9
+                conf, basis = min(0.98, pct), f"Matches the vendor master by {c.vendor_how}"
+            else:
+                conf, basis = 0.7, "Read clearly, but not in the vendor master"
+        elif key == "vendor_tax_id":
+            ok = c.vendor and c.vendor["tax_id"].replace("-", "").upper() == str(v).replace("-", "").upper()
+            conf, basis = (0.99, "Matches the vendor master") if ok else (0.85, "Read clearly, not on file")
+        elif key == "invoice_date":
+            if "/" in str(c.doc.get("text", "")) and any(n.startswith("Slash date") for n in c.extract_notes):
+                conf, basis = (0.95, "Month/day, as this US vendor writes dates") if us_vendor else (0.75, "Day and month order is ambiguous")
+            else:
+                conf, basis = base, "Read next to its label"
+        elif key == "po_number":
+            conf, basis = {"printed": (0.99, "Printed, and the invoice lines confirm it"),
+                           "inferred": (0.8, "Not printed; worked out from the lines and amount"),
+                           "conflict": (0.5, "Contradicts the invoice lines")}.get(c.po_basis, (0.9, "Printed, not yet confirmed"))
+        elif key in ("subtotal", "tax_amount", "total"):
+            conf, basis = (0.6, "Contradicts the other amounts") if amounts_conflict else (0.99, "Cross-checked: lines + tax = total")
+        elif key == "bank_account":
+            conf, basis = (0.99, "Matches the account on file") if v == acct_file else (0.9, "Read clearly, but differs from records")
+        elif key == "currency":
+            conf, basis = base, "From the currency symbols on the invoice"
+        else:
+            conf, basis = base, "Read next to its label"
+        if ocr and key not in c.corrected and v not in (None, ""):
+            conf, basis = conf * q, basis + " (from a scan)"
+        shown = money(v, c.cur()) if key in ("subtotal", "tax_amount", "total") and v is not None else v
+        out.append({"key": key, "label": label, "value": v, "shown": shown, "confidence": round(conf * 100), "basis": basis})
+    required = {"vendor_name", "invoice_number", "invoice_date", "total"}
+    scored = [x["confidence"] for x in out if x["value"] not in (None, "") or x["key"] in required]
+    overall = round(sum(scored) / len(scored)) if scored else 0
+    return out, overall
+
+
+FIX_FIELD = {"missing_fields": None, "totals_conflict": "subtotal", "po_conflict": "po_number", "no_po": "po_number",
+             "vendor_conflict": "vendor_name", "tax_wrong": "tax_amount", "future_date": "invoice_date", "currency": "currency"}
+
+
+def audit_report(c: Ctx, stages, status):
+    """FlowParse-style summary: a score, counts, findings with an action, and every passed check."""
+    passed, warnings, errors, seen = [], [], [], set()
+    for st in stages:
+        if st.get("id") not in ("info", "standard", "duplicates", "split", "delivery"):
+            continue
+        for ch in st.get("checks") or []:
+            key = (st["id"], ch["label"])
+            if key in seen or ch["status"] == "skip":
+                continue
+            seen.add(key)
+            item = {"label": ch["label"], "detail": ch["detail"], "area": st["name"]}
+            cstat = ch["status"]
+            if cstat == "fail" and st.get("outcome") == "review":
+                cstat = "warn"  # a check that sends the invoice for review is a warning, not a violation
+            {"pass": passed, "warn": warnings, "fail": errors}.get(cstat, passed).append(item)
+    notes = list(dict.fromkeys(c.uncertain + [u for st in stages for u in (st.get("uncertain") or []) if st.get("id") in ("duplicates", "split", "delivery")]))
+    findings = []
+    for i in c.issues:
+        fix = FIX_FIELD.get(i["code"], "")
+        if i["code"] == "missing_fields":
+            fix = next((k for k in ("invoice_number", "invoice_date", "total", "vendor_name") if c.f.get(k) in (None, "")), None)
+        findings.append({"level": "error" if i["severity"] == "reject" else "warning", "title": i["source"],
+                         "message": i["message"], "action": f"{ROUTES[i['route']]} to act", "fix_field": fix or None})
+    for n in notes:
+        findings.append({"level": "note", "title": "Note", "message": n, "action": None, "fix_field": None})
+    score = max(0, 100 - 30 * len(errors) - 15 * len(warnings) - 3 * len(notes))
+    label = {APPROVED: "Looks good", REVIEW: "Needs attention", REJECTED: "Payment blocked"}[status]
+    return {"score": score, "label": label, "passed": passed, "warnings": warnings, "errors": errors, "notes": notes,
+            "findings": findings}
+
 
 
 STAGE_FN = {"read": s_read, "extract": s_extract, "info": s_info, "standard": s_standard,
@@ -919,55 +1101,151 @@ STAGE_FN = {"read": s_read, "extract": s_extract, "info": s_info, "standard": s_
 
 
 def run_pipeline(run: dict, delay: float = 0.45):
-    """Execute every stage, saving progress after each so the UI can stream it."""
+    """Execute every stage. Whatever happens, the run ends with a decision, so the UI never hangs."""
+    try:
+        return _run_pipeline(run, delay)
+    except Exception as e:
+        traceback.print_exc()
+        return finish_interrupted(run, f"Processing stopped unexpectedly ({e.__class__.__name__}).")
+
+
+def finish_interrupted(run: dict, reason: str):
+    msg = reason + " A person should review this invoice, or it can be processed again."
+    for st in run.get("stages") or []:
+        if st.get("status") in ("pending", "running"):
+            st.update(status="skip", summary="Not run", checks=[], outcome="na", verdict="Not run: processing was interrupted.",
+                      evidence=[], uncertain=[])
+    decision = {"status": REVIEW, "headline": msg, "why": msg,
+                "reasons": [{"message": msg, "route": ROUTES["ap"], "severity": "review", "source": "Processing"}],
+                "key_checks": [{"id": k, "title": t, "outcome": "na", "verdict": "Not run"} for k, t in KEY_CHECKS],
+                "standard": {"passed": 0, "ran": 0, "failed": []}, "evidence": [], "uncertain": ["The invoice was not fully checked."],
+                "confidence": "Low", "route": ROUTES["ap"], "next_steps": ["Process the invoice again, or check it by hand."],
+                "vendor_message": None}
+    if run.get("stages"):
+        run["stages"][-1].update(status="warn", summary=REVIEW, checks=[], data=decision)
+    run.update(decision=REVIEW, final_status=REVIEW, route=ROUTES["ap"], status="done",
+               result={"matched_lines": [], "issues": [{"code": "interrupted", "severity": "review", "route": "ap",
+                                                       "message": msg, "source": "Processing", "ask_vendor": None}]})
+    store.save_run(run)
+    return run
+
+
+def _run_pipeline(run: dict, delay: float = 0.45):
     c = Ctx(run)
     run["stages"] = [{"id": sid, "name": name, "status": "pending", "key": sid in dict(KEY_CHECKS)} for sid, name in STAGES]
     stopped = False
-    for idx, (sid, name) in enumerate(STAGES):
-        st = run["stages"][idx]
-        if sid == "decide":
-            break
-        if stopped:
-            st.update(status="skip", summary="Not run", checks=[], outcome="na", verdict="Not run: the document could not be read.",
-                      evidence=[], uncertain=[])
-            continue
+    locked = False
+    try:
+        for idx, (sid, name) in enumerate(STAGES):
+            st = run["stages"][idx]
+            if sid == "decide":
+                break
+            if stopped:
+                st.update(status="skip", summary="Not run", checks=[], outcome="na", verdict="Not run: the document could not be read.",
+                          evidence=[], uncertain=[])
+                continue
+            if sid == "info":
+                # From here on the checks depend on what has already been billed and approved.
+                if not DECISION_LOCK.acquire(blocking=False):
+                    st.update(status="running", summary="Waiting for another invoice to finish its checks")
+                    c.event("Waited for another invoice to finish its checks, so both cannot spend the same PO balance", "warn")
+                    store.save_run(run)
+                    DECISION_LOCK.acquire()
+                locked = True
+                c.history = c.load_history()  # fresh, including anything approved while we waited
+            st["status"] = "running"
+            t0 = time.time()
+            store.save_run(run)
+            time.sleep(delay)
+            try:
+                res = STAGE_FN[sid](c)
+            except StopPipeline as sp:
+                res = {**sp.stage_result, "status": "fail"}
+                stopped = True
+            except Exception as e:
+                traceback.print_exc()
+                res = {"status": "fail", "summary": "Unexpected error", "checks": [chk("Unexpected error", "fail", f"{e.__class__.__name__}: {e}")]}
+                c.issue("stage_error", "review", "ap", f"The '{name}' step failed unexpectedly, so a person should review this invoice.", name)
+            if "status" not in res:
+                res["status"] = "pass"
+            st.update(res)
+            st["ms"] = int((time.time() - t0) * 1000)
+            kind = {"pass": "pass", "warn": "warn", "fail": "fail"}.get(res["status"], "info")
+            c.event(f"{name}: {res.get('verdict') or res.get('summary', '')}", kind)
+            if sid == "extract":
+                f = c.f
+                run.update(vendor_name=f.get("vendor_name"), invoice_number=f.get("invoice_number"), invoice_date=f.get("invoice_date"),
+                           total=f.get("total"), currency=f.get("currency"), doc_type=f.get("document_type"),
+                           extractor=c.extractor, po_number=f.get("po_number"))
+            if sid == "info":
+                if c.vendor:
+                    run.update(vendor_id=c.vendor["vendor_id"], vendor_name=c.vendor["name"])
+                if c.po:
+                    run["po_number"] = c.po["po_number"]
+            store.save_run(run)
+        st = run["stages"][-1]
         st["status"] = "running"
-        t0 = time.time()
         store.save_run(run)
         time.sleep(delay)
-        try:
-            res = STAGE_FN[sid](c)
-        except StopPipeline as sp:
-            res = {**sp.stage_result, "status": "fail"}
-            stopped = True
-        except Exception as e:
-            traceback.print_exc()
-            res = {"status": "fail", "summary": "Unexpected error", "checks": [chk("Unexpected error", "fail", f"{e.__class__.__name__}: {e}")]}
-            c.issue("stage_error", "review", "ap", f"The '{name}' step failed unexpectedly, so a person should review this invoice.", name)
-        if "status" not in res:
-            res["status"] = "pass"
-        st.update(res)
-        st["ms"] = int((time.time() - t0) * 1000)
-        if sid == "extract":
-            f = c.f
-            run.update(vendor_name=f.get("vendor_name"), invoice_number=f.get("invoice_number"), invoice_date=f.get("invoice_date"),
-                       total=f.get("total"), currency=f.get("currency"), doc_type=f.get("document_type"),
-                       extractor=c.extractor, po_number=f.get("po_number"))
-        if sid == "info":
-            if c.vendor:
-                run.update(vendor_id=c.vendor["vendor_id"], vendor_name=c.vendor["name"])
-            if c.po:
-                run["po_number"] = c.po["po_number"]
+        decision = s_decide(c, run["stages"])
+        st.update(status={APPROVED: "pass", REVIEW: "warn", REJECTED: "fail"}[decision["status"]],
+                  summary=decision["status"], checks=[], data=decision)
+        run.update(decision=decision["status"], final_status=decision["status"], route=decision["route"], status="done")
+        run["result"] = {"matched_lines": [{"line_no": r["line_no"], "qty": r["qty"], "po_unit": r["po_unit"]} for r in c.matched],
+                         "issues": c.issues}
+        c.event(f"Decision: {decision['status']}. {decision['why']}", {APPROVED: "pass", REVIEW: "warn", REJECTED: "fail"}[decision["status"]])
         store.save_run(run)
-    st = run["stages"][-1]
-    st["status"] = "running"
-    store.save_run(run)
-    time.sleep(delay)
-    decision = s_decide(c, run["stages"])
-    st.update(status={APPROVED: "pass", REVIEW: "warn", REJECTED: "fail"}[decision["status"]],
-              summary=decision["status"], checks=[], data=decision)
-    run.update(decision=decision["status"], final_status=decision["status"], route=decision["route"], status="done")
-    run["result"] = {"matched_lines": [{"line_no": r["line_no"], "qty": r["qty"], "po_unit": r["po_unit"]} for r in c.matched],
-                     "issues": c.issues}
-    store.save_run(run)
-    return run
+        return run
+    finally:
+        if locked:
+            DECISION_LOCK.release()
+
+
+# =========================================================================== rule simulation
+
+
+def simulate(rules: dict):
+    """Compare current rules with proposed ones on the same replay of every processed invoice,
+    so the only differences are the ones the rule change causes."""
+    base_rules = store.load_rules()
+    trial = {**base_rules, **{k: type(base_rules[k])(v) for k, v in rules.items() if k in base_rules}}
+    before = _replay(base_rules)
+    after = _replay(trial)
+    rows = []
+    for b, a in zip(before, after):
+        rows.append({**b, "before": b["status"], "after": a["status"], "why": a["why"], "why_before": b["why"]})
+    count = lambda key, st: sum(1 for x in rows if x[key] == st)
+    summary = {st: {"before": count("before", st), "after": count("after", st)} for st in (APPROVED, REVIEW, REJECTED)}
+    changed = [x for x in rows if x["before"] != x["after"]]
+    return {"rules": trial, "current": base_rules, "total": len(rows), "summary": summary, "changed": changed}
+
+
+def _replay(trial: dict):
+    """Re-decide every processed invoice, in the order it arrived, under the given thresholds.
+    Uses the values already extracted (plus any reviewer corrections), so nothing is re-read and nothing is saved."""
+    runs = sorted([r for r in store.list_runs() if r["status"] == "done" and (r.get("meta") or {}).get("extracted")],
+                  key=lambda r: r["created_at"])
+    history, rows = [], []
+    for r in runs:
+        c = Ctx(r, history=list(history), rules=trial, sim=True)
+        c.doc = dict(c.snapshot["doc"])
+        stages = []
+        try:
+            s_extract(c)
+            for sid in ("info", "standard", "duplicates", "split", "delivery"):
+                res = STAGE_FN[sid](c)
+                stages.append({"id": sid, "name": dict(STAGES)[sid], **res})
+            d = s_decide(c, stages)
+            after, why = d["status"], d["why"]
+        except Exception as e:  # never let one odd invoice break the whole simulation
+            after, why = r["decision"], f"Could not be re-checked ({e.__class__.__name__})"
+        history.append({"id": r["id"], "status": "done", "final_status": after, "decision": after,
+                        "vendor_id": c.vendor["vendor_id"] if c.vendor else None, "invoice_number": c.f.get("invoice_number"),
+                        "invoice_date": c.f.get("invoice_date"), "total": c.f.get("total"), "file_hash": r["file_hash"],
+                        "po_number": c.po["po_number"] if c.po else None, "doc_type": c.f.get("document_type"),
+                        "created_at": r["created_at"], "filename": r["filename"],
+                        "result": {"matched_lines": [{"line_no": m["line_no"], "qty": m["qty"], "po_unit": m["po_unit"]} for m in c.matched]}})
+        rows.append({"id": r["id"], "filename": r["filename"], "vendor_name": r.get("vendor_name"),
+                     "invoice_number": r.get("invoice_number"), "total": r.get("total"), "currency": r.get("currency"),
+                     "status": after, "why": why})
+    return rows

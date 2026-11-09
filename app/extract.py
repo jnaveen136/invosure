@@ -45,19 +45,26 @@ def read_document(path: str) -> dict:
     if len(re.sub(r"\s", "", text)) >= 40:
         return {"method": "text", "text": text, "pages": pages, "ocr_quality": None, "stamp": stamp or None}
 
-    # No usable text layer -> scanned image. Render at high resolution and OCR.
+    # No usable text layer -> scanned image. One OCR pass at a moderate resolution keeps this
+    # fast and light enough for a small server (0.1 CPU / 512 MB on Render's free plan).
     import pypdfium2 as pdfium
     import pytesseract
-    from PIL import ImageFilter
 
+    os.environ.setdefault("OMP_THREAD_LIMIT", "1")  # tesseract threads only fight each other on a tiny CPU
     doc = pdfium.PdfDocument(path)
     chunks, confs = [], []
-    for i in range(len(doc)):
-        img = doc[i].render(scale=3.5).to_pil().convert("L")
-        img = img.filter(ImageFilter.MedianFilter(3)).point(lambda v: 255 if v > 170 else 0)
-        chunks.append(pytesseract.image_to_string(img, config="--psm 6"))
-        data = pytesseract.image_to_data(img, config="--psm 6", output_type=pytesseract.Output.DICT)
-        confs += [float(c) for c, w in zip(data["conf"], data["text"]) if w.strip() and float(c) >= 0]
+    for i in range(min(len(doc), 5)):
+        img = doc[i].render(scale=2.5).to_pil().convert("L").point(lambda v: 255 if v > 170 else 0)
+        data = pytesseract.image_to_data(img, config="--psm 6", output_type=pytesseract.Output.DICT,
+                                         timeout=int(os.environ.get("OCR_TIMEOUT", "120")))
+        del img
+        lines = {}
+        for j, word in enumerate(data["text"]):
+            if word.strip():
+                lines.setdefault((data["block_num"][j], data["par_num"][j], data["line_num"][j]), []).append(word)
+                if float(data["conf"][j]) >= 0:
+                    confs.append(float(data["conf"][j]))
+        chunks.append("\n".join(" ".join(ws) for ws in lines.values()))
     quality = round(sum(confs) / len(confs), 1) if confs else 0.0
     return {"method": "ocr", "text": "\n".join(chunks), "pages": pages, "ocr_quality": quality, "stamp": None}
 

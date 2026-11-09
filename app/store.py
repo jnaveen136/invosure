@@ -106,24 +106,28 @@ def init_db():
             vendor_id TEXT, vendor_name TEXT, invoice_number TEXT, invoice_date TEXT,
             po_number TEXT, total REAL, currency TEXT, doc_type TEXT, extractor TEXT,
             stages TEXT, result TEXT, review TEXT)""")
+        cols = {r[1] for r in con.execute("PRAGMA table_info(runs)")}
+        for extra in ("submitted_by", "meta"):  # columns added after the first release
+            if extra not in cols:
+                con.execute(f"ALTER TABLE runs ADD COLUMN {extra} TEXT")
 
 
 def save_run(run: dict):
     cols = ["id", "created_at", "filename", "file_path", "file_hash", "status", "decision", "final_status", "route",
             "vendor_id", "vendor_name", "invoice_number", "invoice_date", "po_number", "total", "currency",
-            "doc_type", "extractor", "stages", "result", "review"]
+            "doc_type", "extractor", "stages", "result", "review", "submitted_by", "meta"]
     vals = []
     for c in cols:
         v = run.get(c)
-        vals.append(json.dumps(v) if c in ("stages", "result", "review") else v)
+        vals.append(json.dumps(v) if c in ("stages", "result", "review", "meta") else v)
     with _lock, db() as con:
         con.execute(f"INSERT OR REPLACE INTO runs ({','.join(cols)}) VALUES ({','.join('?' * len(cols))})", vals)
 
 
 def _row(r):
     d = dict(r)
-    for c in ("stages", "result", "review"):
-        d[c] = json.loads(d[c]) if d[c] else None
+    for c in ("stages", "result", "review", "meta"):
+        d[c] = json.loads(d[c]) if d.get(c) else None
     return d
 
 

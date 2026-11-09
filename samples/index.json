@@ -1,108 +1,156 @@
 [
   {
     "file": "01_clean_invoice_northwind.pdf",
-    "group": "Happy path",
-    "label": "Clean invoice, everything matches",
+    "group": "Clean invoices (happy path)",
+    "label": "Clean invoice, three lines, everything matches",
     "expect": "Approved"
   },
   {
-    "file": "02_split_po_third_invoice_northwind.pdf",
+    "file": "02_clean_supplies_northwind.pdf",
+    "group": "Clean invoices (happy path)",
+    "label": "Office supplies, delivered in full",
+    "expect": "Approved"
+  },
+  {
+    "file": "03_clean_freight_bluepeak.pdf",
+    "group": "Clean invoices (happy path)",
+    "label": "Freight service, different invoice layout",
+    "expect": "Approved"
+  },
+  {
+    "file": "04_clean_subscription_summit.pdf",
+    "group": "Clean invoices (happy path)",
+    "label": "Monthly cloud subscription, two service lines",
+    "expect": "Approved"
+  },
+  {
+    "file": "05_clean_small_service_greenleaf.pdf",
+    "group": "Clean invoices (happy path)",
+    "label": "Small one-line service invoice",
+    "expect": "Approved"
+  },
+  {
+    "file": "06_clean_hardware_brightline.pdf",
+    "group": "Clean invoices (happy path)",
+    "label": "Hardware with sales tax, goods received",
+    "expect": "Approved"
+  },
+  {
+    "file": "07_clean_catering_meridian.pdf",
+    "group": "Clean invoices (happy path)",
+    "label": "Recurring office service",
+    "expect": "Approved"
+  },
+  {
+    "file": "08_split_po_third_invoice_northwind.pdf",
     "group": "1. Split invoices",
     "label": "Third invoice on one PO, stays within what is left",
     "expect": "Approved"
   },
   {
-    "file": "03_split_po_overbilled_northwind.pdf",
+    "file": "09_split_po_overbilled_northwind.pdf",
     "group": "1. Split invoices",
     "label": "Another invoice on the same PO bills more chairs than were ordered",
     "expect": "Rejected"
   },
   {
-    "file": "04_split_to_dodge_approval_limit_orion.pdf",
+    "file": "10_split_to_dodge_approval_limit_orion.pdf",
     "group": "1. Split invoices",
     "label": "Job split into two bills, each just under the approval limit",
     "expect": "Needs review"
   },
   {
-    "file": "05_duplicate_already_paid_northwind.pdf",
+    "file": "11_duplicate_already_paid_northwind.pdf",
     "group": "2. Duplicate invoices",
     "label": "Already paid in September, re-sent as a reminder copy",
     "expect": "Rejected"
   },
   {
-    "file": "06_duplicate_number_reformatted_bluepeak.pdf",
+    "file": "12_duplicate_number_reformatted_bluepeak.pdf",
     "group": "2. Duplicate invoices",
     "label": "Same invoice re-sent with the number written differently",
     "expect": "Rejected"
   },
   {
-    "file": "07_possible_duplicate_bluepeak.pdf",
+    "file": "13_possible_duplicate_bluepeak.pdf",
     "group": "2. Duplicate invoices",
     "label": "New number, but same amount as a bill from the day before",
     "expect": "Needs review"
   },
   {
-    "file": "08_same_number_other_vendor_meridian.pdf",
+    "file": "14_same_number_other_vendor_meridian.pdf",
     "group": "2. Duplicate invoices",
     "label": "Invoice number already used, but by a different vendor",
     "expect": "Approved"
   },
   {
-    "file": "09_billed_more_than_delivered_brightline.pdf",
+    "file": "15_billed_more_than_delivered_brightline.pdf",
     "group": "3. Partial delivery",
     "label": "Bills all 25 monitors, only 18 have arrived",
     "expect": "Needs review"
   },
   {
-    "file": "10_partial_delivery_billed_correctly_brightline.pdf",
+    "file": "16_partial_delivery_billed_correctly_brightline.pdf",
     "group": "3. Partial delivery",
     "label": "30 of 40 keyboards delivered, invoice bills exactly 30",
     "expect": "Approved"
   },
   {
-    "file": "11_missing_number_and_date_greenleaf.pdf",
+    "file": "17_missing_number_and_date_greenleaf.pdf",
     "group": "4. Missing or conflicting information",
     "label": "Invoice number and date are missing",
     "expect": "Needs review"
   },
   {
-    "file": "12_totals_conflict_greenleaf.pdf",
+    "file": "18_totals_conflict_greenleaf.pdf",
     "group": "4. Missing or conflicting information",
     "label": "Line items add up to less than the stated total",
     "expect": "Needs review"
   },
   {
-    "file": "13_no_po_number_inferred_summit.pdf",
+    "file": "19_no_po_number_inferred_summit.pdf",
     "group": "4. Missing or conflicting information",
     "label": "No PO number printed, the right PO is worked out",
     "expect": "Approved"
   },
   {
-    "file": "14_wrong_po_number_printed_northwind.pdf",
+    "file": "20_wrong_po_number_printed_northwind.pdf",
     "group": "4. Missing or conflicting information",
     "label": "Printed PO belongs to another vendor, lines match a different PO",
     "expect": "Needs review"
   },
   {
-    "file": "15_scanned_invoice_northwind.pdf",
+    "file": "21_scanned_invoice_northwind.pdf",
     "group": "4. Missing or conflicting information",
     "label": "Scanned paper invoice, read with OCR",
     "expect": "Approved"
   },
   {
-    "file": "16_bank_account_changed_bluepeak.pdf",
+    "file": "22_same_time_a_harbor.pdf",
+    "group": "Same-time processing",
+    "label": "$15,000 against a PO with $20,000 left (run with the next one)",
+    "expect": "Approved"
+  },
+  {
+    "file": "23_same_time_b_harbor.pdf",
+    "group": "Same-time processing",
+    "label": "Another $15,000 on the same PO, arriving at the same moment",
+    "expect": "Rejected"
+  },
+  {
+    "file": "24_bank_account_changed_bluepeak.pdf",
     "group": "Standard checks (simple pass or fail)",
     "label": "Bank account on the invoice differs from our records",
     "expect": "Rejected"
   },
   {
-    "file": "17_unknown_vendor_apex.pdf",
+    "file": "25_unknown_vendor_apex.pdf",
     "group": "Standard checks (simple pass or fail)",
     "label": "Vendor is not in the approved vendor list",
     "expect": "Rejected"
   },
   {
-    "file": "18_price_above_po_summit.pdf",
+    "file": "26_price_above_po_summit.pdf",
     "group": "Standard checks (simple pass or fail)",
     "label": "Price is 8.8% above the PO, over the tolerance",
     "expect": "Rejected"

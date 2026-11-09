@@ -55,7 +55,7 @@ const KEY_CHECKS = [
 
 /* ------------------------------------------------------------------ router */
 let current = { view: null, cleanup: null };
-const VIEWS = { overview: viewOverview, process: viewProcess, invoices: viewInvoices, pos: viewPOs, rules: viewRules };
+const VIEWS = { overview: viewOverview, process: viewProcess, invoices: viewInvoices, pos: viewPOs, rules: viewRules, batch: viewBatch };
 
 function route() {
   const raw = location.hash.replace("#", "") || "overview";
@@ -70,65 +70,268 @@ function route() {
 }
 window.addEventListener("hashchange", route);
 
-/* ------------------------------------------------------------------ overview */
+/* ------------------------------------------------------------------ light / dark mode */
+const darkQuery = window.matchMedia("(prefers-color-scheme: dark)");
+const isDark = () => {
+  const t = document.documentElement.getAttribute("data-theme");
+  return t ? t === "dark" : darkQuery.matches;
+};
+function syncThemeButton() {
+  const b = $("#theme-btn"), dark = isDark();
+  b.classList.toggle("is-dark", dark);
+  b.setAttribute("aria-label", dark ? "Switch to light mode" : "Switch to dark mode");
+  b.querySelector(".theme-label").textContent = dark ? "Light" : "Dark";
+}
+$("#theme-btn").addEventListener("click", () => {
+  const next = isDark() ? "light" : "dark";
+  document.documentElement.setAttribute("data-theme", next);
+  try { localStorage.setItem("invosure-theme", next); } catch (e) {}
+  syncThemeButton();
+});
+darkQuery.addEventListener("change", syncThemeButton); // follows the system until a choice is made
+syncThemeButton();
+
+/* ------------------------------------------------------------------ overview (dashboard) */
+const ICONS = {
+  doc: '<path d="M14 3H7a2 2 0 00-2 2v14a2 2 0 002 2h10a2 2 0 002-2V8z"/><path d="M14 3v5h5M9 13h6M9 17h4"/>',
+  shield: '<path d="M12 3l7 3v5c0 4.5-3 8.3-7 10-4-1.7-7-5.5-7-10V6z"/><path d="M9 12l2 2 4-4"/>',
+  star: '<path d="M12 4l2.5 5.1 5.5.8-4 3.9.9 5.5L12 16.7 7.1 19.3l.9-5.5-4-3.9 5.5-.8z"/>',
+  alert: '<path d="M12 4l9 16H3z"/><path d="M12 10v4M12 17h.01"/>',
+  eye: '<path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/>',
+  cal: '<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/>',
+};
+const svgIcon = (name, size = 20) => `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name]}</svg>`;
+const ktile = (icon, label, value, sub, tone = "") => `<div class="panel ktile"><span class="kicon ${tone}">${svgIcon(icon)}</span>
+  <div style="min-width:0"><div class="label">${label}</div><div class="kvalue">${value}</div><div class="sub">${sub}</div></div></div>`;
+
 async function viewOverview() {
-  app.innerHTML = `<div class="page-head"><div><h1 class="page-title">Accounts payable overview</h1>
-    <p class="lede">Every invoice runs through four key checks and a set of standard checks, then is approved, sent for review or rejected, with the reasons and evidence shown.</p></div>
-    <a class="btn" href="#process">Process an invoice</a></div><div id="ov" class="stack"><div class="panel empty">Loading…</div></div>`;
-  const [s, runs] = await Promise.all([api("/api/stats"), api("/api/runs")]);
-  const done = runs.filter((r) => r.status === "done");
-  const attention = done.filter((r) => r.final_status !== "Approved" && !r.review).slice(0, 6);
+  app.innerHTML = `<div id="ov" class="stack"><div class="panel empty">Loading…</div></div>`;
+  const s = await api("/api/stats");
+  const range = s.first_day ? (s.first_day === s.last_day ? fmtDate(s.first_day) : `${fmtDate(s.first_day)} - ${fmtDate(s.last_day)}`) : "No invoices yet";
+  const pct = (n) => (s.processed ? Math.round((n / s.processed) * 100) : 0);
   $("#ov").innerHTML = `
+    <div class="page-head"><div><div class="eyebrow">Welcome back</div><h1 class="page-title">Invoice decisions overview</h1>
+      <p class="lede">How invoices are being read, checked and decided.</p></div>
+      <div class="row"><span class="date-chip">${svgIcon("cal", 16)} ${esc(range)}</span><a class="btn" href="#process">+ Process invoice</a></div></div>
     <div class="tiles">
-      ${tile("Invoices processed", s.processed, `${s.approved} approved, ${s.on_hold} need review, ${s.rejected} rejected`)}
-      ${tile("Value processed", compact(s.value_processed), `${money(s.value_approved)} approved for payment`)}
-      ${tile("Approved without a person", s.auto_rate + "%", "Straight-through rate")}
-      ${tile("Value stopped", compact(s.value_on_hold + s.value_blocked), `${money(s.value_blocked)} rejected`)}
+      ${ktile("doc", "Invoices processed", s.processed, `${s.approved} approved · ${s.on_hold} need review · ${s.rejected} rejected`)}
+      ${ktile("shield", "Straight-through rate", s.auto_rate + "%", "Approved with no person involved", "ok")}
+      ${ktile("star", "High-confidence reads", s.high_conf, `${pct(s.high_conf)}% read at 95% confidence or more`)}
+      ${ktile("alert", "Exceptions", s.exceptions, `${money(s.value_at_risk)} money at risk`, "bad")}
+    </div>
+    <div class="chart-row">
+      <section class="panel chart-card"><div class="chart-head"><h2 class="chart-title">Straight-through rate over time</h2><span class="muted">by invoice, in order processed</span></div>
+        <div class="chart-box" id="line"></div></section>
+      <section class="panel chart-card"><div class="chart-head"><h2 class="chart-title">Decisions</h2></div><div id="donut"></div></section>
+      <section class="panel chart-card"><div class="chart-head"><h2 class="chart-title">Extraction confidence</h2><span class="muted">invoices by average field confidence</span></div><div id="dist"></div></section>
     </div>
     <section class="panel">
-      <div class="panel-head"><h2 class="section-title">Key checks across all invoices</h2><span class="muted">Extraction: ${esc(s.extractor)}</span></div>
-      <div class="key-stats">${s.key_stats.map(keyStat).join("")}</div>
+      <div class="panel-head"><h2 class="section-title">Recent documents</h2><a href="#invoices">View all documents →</a></div>
+      ${recentTable(s.recent)}
     </section>
-    <div class="two">
-      <section class="panel">
-        <div class="panel-head"><h2 class="section-title">Needs attention</h2><span class="muted">${attention.length ? "Not yet reviewed" : ""}</span></div>
-        <div class="panel-pad">${attention.length ? `<div class="attn">${attention.map(attnCard).join("")}</div>` :
-          `<div class="empty"><strong>Nothing waiting</strong>Invoices that need review or were rejected show up here.</div>`}</div>
-      </section>
-      <section class="panel">
-        <div class="panel-head"><h2 class="section-title">Most common reasons</h2></div>
-        ${reasonsPanel(s.top_issues)}
-      </section>
-    </div>
-    <section class="panel">
-      <div class="panel-head"><h2 class="section-title">Recent invoices</h2><a href="#invoices">View all</a></div>
-      ${runsTable(done.slice(0, 8))}
-    </section>`;
+    <section class="panel banner">${svgIcon("shield", 22)}<div style="min-width:0"><b>Every decision explained</b>
+      <div class="muted">InvoSure shows the evidence, what is still uncertain and who acts next, for every invoice.</div></div>
+      <a class="btn secondary" href="#rules">Configure rules →</a></section>`;
+  drawLine($("#line"), s.series);
+  drawDonut($("#donut"), s.decisions, s.processed);
+  drawDist($("#dist"), s.confidence_dist, s.processed);
   bindRunRows();
 }
-const tile = (label, value, sub) => `<div class="panel tile"><div class="label">${label}</div><div class="value">${value}</div><div class="sub">${esc(sub)}</div></div>`;
-function keyStat(k, i) {
-  const total = k.pass + k.review + k.reject + k.na || 1;
-  const seg = (n, cls) => (n ? `<span class="seg ${cls}" style="width:${(n / total) * 100}%"></span>` : "");
-  return `<div class="key-stat"><div class="ks-title"><span class="n">${i + 1}</span>${esc(k.title)}</div>
-    <div class="stackbar">${seg(k.pass, "ok")}${seg(k.review, "warn")}${seg(k.reject, "bad")}${seg(k.na, "idle")}</div>
-    <div class="ks-legend"><span><i class="ok"></i>${k.pass} passed</span><span><i class="warn"></i>${k.review} review</span><span><i class="bad"></i>${k.reject} rejected</span><span><i class="idle"></i>${k.na} n/a</span></div></div>`;
+
+function confBar(v) {
+  if (v === null || v === undefined) return '<span class="muted">-</span>';
+  const tone = v >= 95 ? "ok" : v >= 80 ? "mid" : v >= 50 ? "warn" : "bad";
+  return `<span class="confbar"><span class="num">${v}%</span><span class="cb-track"><span class="cb-fill ${tone}" style="width:${v}%"></span></span></span>`;
 }
-const REASON_NAMES = {
-  dup_number: "Duplicate invoice number", dup_file: "Same file sent again", near_dup: "Possible duplicate",
-  over_billed: "Billed beyond the PO", split_limit: "Split under approval limit", not_received: "Billed before delivery",
-  missing_fields: "Missing fields", totals_conflict: "Amounts contradict", po_conflict: "Wrong or unclear PO", no_po: "No PO",
-  vendor_conflict: "Vendor identity unclear", ocr_quality: "Hard-to-read scan",
-  unknown_vendor: "Unknown vendor", blocked_vendor: "Blocked vendor", bank_changed: "Bank details changed",
-  price_variance: "Price above PO", currency: "Currency mismatch", line_not_on_po: "Line not on PO", po_closed: "PO closed",
-  tax_wrong: "Tax wrong", future_date: "Future-dated", stale: "Too old", approval_limit: "Above approval limit",
-  not_pdf: "Not a PDF", unreadable: "Unreadable PDF", stage_error: "Processing error",
-};
-function reasonsPanel(top) {
-  if (!top.length) return `<div class="empty">No exceptions yet.</div>`;
-  const max = Math.max(...top.map((x) => x[1]));
-  return `<div class="issue-bars">${top.map(([k, n]) => `<div><div class="ib-top"><span>${esc(REASON_NAMES[k] || k)}</span><span class="num">${n}</span></div>
-    <div class="bar"><span class="now" style="width:${(n / max) * 100}%"></span></div></div>`).join("")}</div>`;
+function recentTable(rows) {
+  if (!rows.length) return `<div class="empty"><strong>No documents yet</strong>Process a test invoice to fill the dashboard.</div>`;
+  return `<div class="table-wrap"><table><thead><tr><th>Invoice number</th><th>Supplier</th><th>Invoice date</th><th class="num">Total amount</th><th>Status</th><th>Confidence</th><th></th></tr></thead><tbody>
+  ${rows.map((r) => `<tr class="clickable" data-open="${r.id}"><td><span class="row" style="gap:8px">${svgIcon("doc", 16)}${esc(r.invoice_number || "Missing")}</span></td>
+    <td>${esc(r.vendor_name || "-")}</td><td>${fmtDate(r.invoice_date)}</td><td class="num">${money(r.total, r.currency || "USD")}</td>
+    <td>${pill(r.final_status)}</td><td>${confBar(r.confidence)}</td><td><button class="icon-btn" aria-label="View" data-open="${r.id}">${svgIcon("eye", 18)}</button></td></tr>`).join("")}
+  </tbody></table></div>`;
+}
+
+function drawLine(el, series) {
+  if (!series.length) { el.innerHTML = `<div class="empty">No data yet.</div>`; return; }
+  const W = 560, H = 220, L = 40, R = 14, T = 12, B = 30;
+  const n = series.length;
+  const x = (i) => L + (n === 1 ? (W - L - R) / 2 : (i / (n - 1)) * (W - L - R));
+  const y = (v) => T + (1 - v / 100) * (H - T - B);
+  const pts = series.map((p, i) => [x(i), y(p.rate)]);
+  const line = pts.map((p, i) => (i ? "L" : "M") + p[0].toFixed(1) + " " + p[1].toFixed(1)).join(" ");
+  const area = `${line} L ${pts[n - 1][0].toFixed(1)} ${y(0)} L ${pts[0][0].toFixed(1)} ${y(0)} Z`;
+  const grid = [0, 25, 50, 75, 100].map((v) => `<line x1="${L}" x2="${W - R}" y1="${y(v)}" y2="${y(v)}" class="grid"/><text x="${L - 8}" y="${y(v) + 4}" class="axis" text-anchor="end">${v}%</text>`).join("");
+  const ticks = [...new Set([0, Math.floor((n - 1) / 2), n - 1])].map((i) => `<text x="${x(i)}" y="${H - 8}" class="axis" text-anchor="middle">#${i + 1}</text>`).join("");
+  const last = pts[n - 1];
+  el.innerHTML = `<svg viewBox="0 0 ${W} ${H}" class="chart" role="img" aria-label="Straight-through rate after each invoice; latest ${series[n - 1].rate}%">
+    ${grid}${ticks}<path d="${area}" class="area"/><path d="${line}" class="line"/>
+    <circle cx="${last[0]}" cy="${last[1]}" r="5" class="endpoint"/>
+    <text x="${Math.min(last[0], W - R - 4)}" y="${last[1] - 12}" class="endlabel" text-anchor="end">${series[n - 1].rate}%</text>
+    <line class="xhair" x1="0" x2="0" y1="${T}" y2="${y(0)}" visibility="hidden"/><circle class="hoverdot" r="5" visibility="hidden"/>
+    <rect x="${L}" y="${T}" width="${W - L - R}" height="${H - T - B}" fill="transparent" class="hit"/></svg><div class="tip" hidden></div>`;
+  const svg = el.querySelector("svg"), tip = el.querySelector(".tip"), xh = svg.querySelector(".xhair"), dot = svg.querySelector(".hoverdot");
+  svg.querySelector(".hit").addEventListener("mousemove", (e) => {
+    const r = svg.getBoundingClientRect(), sx = ((e.clientX - r.left) / r.width) * W;
+    let i = n === 1 ? 0 : Math.round(((sx - L) / (W - L - R)) * (n - 1));
+    i = Math.max(0, Math.min(n - 1, i));
+    const p = series[i];
+    xh.setAttribute("x1", pts[i][0]); xh.setAttribute("x2", pts[i][0]); xh.setAttribute("visibility", "visible");
+    dot.setAttribute("cx", pts[i][0]); dot.setAttribute("cy", pts[i][1]); dot.setAttribute("visibility", "visible");
+    tip.hidden = false;
+    tip.innerHTML = `<b>Invoice #${p.n}: ${p.rate}%</b><br><span class="muted">${esc(p.file)}</span><br>${pill(p.status)}`;
+    const left = (pts[i][0] / W) * r.width;
+    tip.style.left = Math.min(Math.max(left - 90, 0), r.width - 190) + "px";
+  });
+  svg.querySelector(".hit").addEventListener("mouseleave", () => { tip.hidden = true; xh.setAttribute("visibility", "hidden"); dot.setAttribute("visibility", "hidden"); });
+}
+
+function drawDonut(el, d, total) {
+  const parts = [["Approved", "ok"], ["Needs review", "warn"], ["Rejected", "bad"]].map(([k, c]) => ({ k, c, v: d[k] || 0 }));
+  const R = 62, C = 2 * Math.PI * R, gap = total > 1 ? 3 : 0;
+  let off = 0;
+  const arcs = parts.filter((p) => p.v).map((p) => {
+    const len = (p.v / Math.max(total, 1)) * C;
+    const a = `<circle r="${R}" cx="80" cy="80" class="seg ${p.c}" stroke-dasharray="${Math.max(len - gap, 0.1)} ${C}" stroke-dashoffset="${-off}"><title>${p.k}: ${p.v}</title></circle>`;
+    off += len; return a;
+  }).join("");
+  el.innerHTML = `<div class="donut-wrap"><svg viewBox="0 0 160 160" class="donut" role="img" aria-label="Decisions: ${parts.map((p) => `${p.k} ${p.v}`).join(", ")}">
+    <circle r="${R}" cx="80" cy="80" class="track"/><g transform="rotate(-90 80 80)">${arcs}</g>
+    <text x="80" y="80" text-anchor="middle" class="dn-num">${total}</text><text x="80" y="100" text-anchor="middle" class="dn-sub">Total</text></svg>
+    <ul class="legend">${parts.map((p) => `<li><i class="${p.c}"></i><span>${p.k}<br><b class="num">${p.v}</b> <span class="muted">(${total ? Math.round((p.v / total) * 100) : 0}%)</span></span></li>`).join("")}</ul></div>`;
+}
+
+function drawDist(el, dist, total) {
+  const max = Math.max(1, ...dist.map((x) => x.count));
+  el.innerHTML = `<div class="dist">${dist.map((b) => `<div class="dist-row"><span class="muted num">${b.label}</span>
+    <span class="dist-track"><span class="dist-fill" style="width:${(b.count / max) * 100}%"></span></span>
+    <span class="num">${b.count} <span class="muted">(${total ? Math.round((b.count / total) * 100) : 0}%)</span></span></div>`).join("")}</div>`;
+}
+
+/* ------------------------------------------------------------------ same-time processing */
+async function viewBatch(arg) {
+  const ids = (arg || "").split(".").filter(Boolean);
+  app.innerHTML = `<div class="page-head"><div><div class="eyebrow">Same-time processing</div><h1 class="page-title">Two invoices, one PO balance</h1>
+    <p class="lede">Both invoices were sent at the same moment. PO-1026 has $20,000 left and each invoice asks for $15,000. Without protection, both checks would see $20,000 available and both would be approved. InvoSure lets only one invoice at a time read the billing history and record its decision.</p></div>
+    <a class="btn secondary" href="#process">Process another</a></div><div class="batch-grid" id="batch"></div>`;
+  let timer = null;
+  const tick = async () => {
+    const runs = await Promise.all(ids.map((id) => api(`/api/runs/${id}`).catch(() => null)));
+    $("#batch").innerHTML = runs.map((r) => {
+      if (!r) return `<section class="panel panel-pad">Not found</section>`;
+      const steps = r.stages || [];
+      const doneN = steps.filter((s) => ["pass", "warn", "fail", "skip"].includes(s.status)).length;
+      const waiting = steps.some((s) => s.status === "running" && /Waiting for another invoice/.test(s.summary || ""));
+      const waited = ((r.meta || {}).timeline || []).some((e) => /Waited for another invoice/.test(e.text));
+      const dec = (steps.find((s) => s.id === "decide") || {}).data;
+      return `<section class="panel panel-pad batch-card ${r.status === "done" ? statusClass(r.final_status) : ""}">
+        <div class="attn-top"><div><div class="attn-title">${esc(r.invoice_number || r.filename)}</div><div class="cell-sub">${esc(r.filename)}</div></div>${r.status === "done" ? pill(r.final_status) : pill(null)}</div>
+        <div class="bar" style="margin:14px 0 8px"><span class="now" style="width:${(doneN / steps.length) * 100}%"></span></div>
+        <div class="muted" style="font-size:13.5px">${doneN} of ${steps.length} steps</div>
+        ${waiting ? `<div class="wait-note">Waiting for the other invoice to finish its checks…</div>` : ""}
+        ${r.status === "done" && waited ? `<div class="wait-note">Waited for the other invoice, then re-read the PO balance.</div>` : ""}
+        ${dec && dec.why ? `<p style="margin:12px 0 0;font-weight:600">${esc(dec.why)}</p>` : ""}
+        <a href="#process-run-${r.id}" style="display:inline-block;margin-top:12px">Open the full run →</a></section>`;
+    }).join("");
+    if (runs.every((r) => r && r.status === "done")) clearInterval(timer);
+  };
+  await tick();
+  timer = setInterval(tick, 600);
+  current.cleanup = () => clearInterval(timer);
+}
+
+/* ------------------------------------------------------------------ audit report, extracted data, timeline */
+function scoreRing(score, label) {
+  const R = 52, C = 2 * Math.PI * R, tone = label === "Payment blocked" ? "bad" : label === "Needs attention" ? "warn" : "ok";
+  return `<svg viewBox="0 0 130 130" class="ring" role="img" aria-label="Audit score ${score} out of 100">
+    <circle cx="65" cy="65" r="${R}" class="track"/><circle cx="65" cy="65" r="${R}" class="ring-fill ${tone}" stroke-dasharray="${(score / 100) * C} ${C}" transform="rotate(-90 65 65)"/>
+    <text x="65" y="68" text-anchor="middle" class="ring-num">${score}</text><text x="65" y="88" text-anchor="middle" class="ring-sub">/ 100</text></svg>`;
+}
+function auditPanel(d) {
+  const a = d.audit;
+  if (!a) return "";
+  const tone = a.label === "Looks good" ? "ok" : a.label === "Needs attention" ? "warn" : "bad";
+  const LV = { error: ["bad", "Error"], warning: ["warn", "Warning"], note: ["note", "Note"] };
+  return `<section class="panel audit-panel">
+    <div class="panel-head"><div class="row"><span class="kicon">${svgIcon("shield")}</span><div><h2 class="section-title">Audit report</h2><div class="muted" style="font-size:13px">Every check run on this invoice</div></div></div>
+      <span class="pill ${tone}">${esc(a.label)}</span></div>
+    <div class="audit-top">${scoreRing(a.score, a.label)}
+      <div class="audit-counts">
+        <div class="cnt ok"><b class="num">${a.passed.length}</b><span>Passed</span></div>
+        <div class="cnt warn"><b class="num">${a.warnings.length}</b><span>Warnings</span></div>
+        <div class="cnt bad"><b class="num">${a.errors.length}</b><span>Errors</span></div>
+        <div class="cnt note"><b class="num">${a.notes.length}</b><span>Notes</span></div>
+      </div>
+      <div class="audit-conf"><div class="label">Extraction confidence</div><div class="kvalue">${d.extraction_confidence}%</div><div class="sub">average across fields read</div></div>
+    </div>
+    ${a.findings.length ? `<div class="findings">${a.findings.map((f) => `<div class="finding ${LV[f.level][0]}">
+      <div style="min-width:0"><div class="f-title">${LV[f.level][1]} · ${esc(f.title)}</div><div class="f-msg">${esc(f.message)}</div>${f.action ? `<div class="f-act">→ ${esc(f.action)}</div>` : ""}</div>
+      ${f.fix_field ? `<button class="btn sm secondary" data-fix="${f.fix_field}">Fix manually</button>` : ""}</div>`).join("")}</div>` : ""}
+    <div class="passed-head eyebrow">Passed checks (${a.passed.length})</div>
+    <div class="passed-grid">${a.passed.map((p) => `<div class="passed"><span class="ci">${ICON.pass}</span><div style="min-width:0"><b>${esc(p.label)}</b><div class="muted">${esc(p.detail || p.area)}</div></div></div>`).join("")}</div>
+  </section>`;
+}
+
+function extractedPanel(run, d) {
+  const ext = (run.stages || []).find((s) => s.id === "extract");
+  const lines = ext && ext.data && ext.data.fields ? ext.data.fields.line_items || [] : [];
+  const cur = run.currency || "USD";
+  const fieldRows = (d.fields || []).map((f) => {
+    const type = (d.editable.find((e) => e.key === f.key) || {}).type;
+    const val = f.value === null || f.value === undefined ? "" : f.value;
+    return `<tr><td><label for="fx-${f.key}">${esc(f.label)}</label></td>
+      <td><input class="field fx" id="fx-${f.key}" data-key="${f.key}" data-orig="${esc(val)}" type="${type === "date" ? "date" : "text"}" value="${esc(val)}" placeholder="Not found"></td>
+      <td>${confBar(f.confidence)}</td><td class="cell-sub">${esc(f.basis)}</td></tr>`;
+  }).join("");
+  return `<section class="panel" id="extracted-panel">
+    <div class="panel-head"><div><h2 class="section-title">Extracted data</h2><div class="muted" style="font-size:13px">Edit any field, then re-run every check on the corrected values.</div></div>
+      <div class="seg-tabs" role="tablist"><button class="on" data-tab="review">Review</button><button data-tab="table">Table</button><button data-tab="json">JSON</button></div></div>
+    <div data-pane="review"><div class="table-wrap"><table class="fields-table"><thead><tr><th>Field</th><th>Value</th><th>Confidence</th><th>Why</th></tr></thead><tbody>${fieldRows}</tbody></table></div>
+      <div class="panel-pad row" style="justify-content:space-between"><span class="muted" id="fx-hint">No changes yet.</span><button class="btn" id="fx-run" disabled>Re-run checks with my changes</button></div></div>
+    <div data-pane="table" hidden><div class="table-wrap"><table><thead><tr><th>Line</th><th class="num">Qty</th><th class="num">Unit price</th><th class="num">Amount</th></tr></thead><tbody>
+      ${lines.map((l) => `<tr><td>${esc(l.description)}</td><td class="num">${l.qty}</td><td class="num">${money(l.unit_price, cur)}</td><td class="num">${money(l.amount, cur)}</td></tr>`).join("") || '<tr><td colspan="4" class="muted">No itemised lines</td></tr>'}</tbody></table></div></div>
+    <div data-pane="json" hidden><pre class="text-dump" style="margin:16px 24px;max-height:420px">${esc(JSON.stringify(ext && ext.data ? ext.data.fields : {}, null, 2))}</pre></div>
+  </section>`;
+}
+function bindExtracted(run) {
+  const panel = $("#extracted-panel");
+  if (!panel) return;
+  panel.querySelectorAll("[data-tab]").forEach((b) => b.addEventListener("click", () => {
+    panel.querySelectorAll("[data-tab]").forEach((x) => x.classList.toggle("on", x === b));
+    panel.querySelectorAll("[data-pane]").forEach((p) => (p.hidden = p.dataset.pane !== b.dataset.tab));
+  }));
+  const inputs = [...panel.querySelectorAll(".fx")];
+  const changed = () => inputs.filter((i) => i.value.trim() !== i.dataset.orig);
+  inputs.forEach((i) => i.addEventListener("input", () => {
+    const c = changed();
+    i.classList.toggle("edited", i.value.trim() !== i.dataset.orig);
+    $("#fx-run").disabled = !c.length;
+    $("#fx-hint").textContent = c.length ? `${c.length} field${c.length > 1 ? "s" : ""} changed` : "No changes yet.";
+  }));
+  $("#fx-run").addEventListener("click", async () => {
+    const fields = {};
+    changed().forEach((i) => (fields[i.dataset.key] = i.value.trim()));
+    try {
+      await api(`/api/runs/${run.id}/correct`, { method: "POST", body: JSON.stringify({ fields }) });
+      toast("Re-running every check with your corrections");
+      showRun(run.id);
+    } catch (e) { toast(e.message); }
+  });
+  document.querySelectorAll("[data-fix]").forEach((b) => b.addEventListener("click", () => {
+    const inp = $(`#fx-${b.dataset.fix}`);
+    if (!inp) return;
+    panel.querySelector('[data-tab="review"]').click();
+    inp.scrollIntoView({ behavior: "smooth", block: "center" });
+    setTimeout(() => inp.focus(), 350);
+  }));
+}
+
+function timelinePanel(run) {
+  const tl = (run.meta || {}).timeline || [];
+  if (!tl.length) return "";
+  const t = (iso) => new Date(iso).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", second: "2-digit" });
+  return `<section class="panel"><div class="panel-head"><h2 class="section-title">Invoice timeline</h2><span class="muted">Everything that happened, in order</span></div>
+    <ol class="timeline">${tl.map((e) => `<li class="${e.kind}"><span class="tl-time num">${t(e.at)}</span><span class="tl-dot"></span><span class="tl-text">${esc(e.text)}</span></li>`).join("")}</ol></section>`;
 }
 
 function attnCard(r) {
@@ -190,13 +393,20 @@ async function viewProcess(runId) {
   const list = await api("/api/samples");
   const groups = [...new Set(list.map((s) => s.group))];
   let i = 0;
-  $("#samples").innerHTML = groups.map((g) => `<div class="sample-group">${esc(g)}</div><ul class="samples">${list.filter((s) => s.group === g).map((s) => `
+  $("#samples").innerHTML = groups.map((g) => `<div class="sample-group">${esc(g)}${g === "Same-time processing" ? ' <button class="btn sm" id="run-both">Run both at the same time</button>' : ""}</div><ul class="samples">${list.filter((s) => s.group === g).map((s) => `
     <li data-file="${esc(s.file)}"><span class="idx">${String(++i).padStart(2, "0")}</span>
       <span style="min-width:0"><div class="s-label">${esc(s.label)}</div><div class="s-file">${esc(s.file)}</div></span>${pill(s.expect)}</li>`).join("")}</ul>`).join("");
   $("#samples").querySelectorAll("li[data-file]").forEach((li) => li.addEventListener("click", async () => {
     const { id } = await api("/api/runs/sample", { method: "POST", body: JSON.stringify({ file: li.dataset.file }) });
     location.hash = "process-run-" + id;
   }));
+  const both = $("#run-both");
+  if (both) both.addEventListener("click", async (e) => {
+    e.stopPropagation();
+    const files = list.filter((x) => x.group === "Same-time processing").map((x) => x.file);
+    const { ids } = await api("/api/runs/batch", { method: "POST", body: JSON.stringify({ files }) });
+    location.hash = "batch-run-" + ids.join(".");
+  });
   const drop = $("#drop"), input = $("#file-in");
   const send = async (file) => {
     if (!file) return;
@@ -220,6 +430,7 @@ function showRun(id) {
         <div class="key-grid" id="keys"></div>
         <div id="std-line"></div></section>
       <div id="decision"></div>
+      <div id="after-decision" class="stack"></div>
       <div class="runview">
         <section class="panel"><div class="panel-head"><h2 class="section-title">Step by step</h2><span class="muted">Click a step to open it</span></div><ol class="steps" id="steps"></ol></section>
         <section class="panel doc-frame"><div class="panel-head"><span class="eyebrow">Source document</span><a href="/api/runs/${id}/file" target="_blank" rel="noopener">Open PDF</a></div>
@@ -234,9 +445,20 @@ function showRun(id) {
   let lastRun = null;
   const es = new EventSource(`/api/runs/${id}/stream`);
   es.onmessage = (e) => { lastRun = JSON.parse(e.data); renderRun(lastRun, open); };
+  let poll = null;
   es.addEventListener("done", () => es.close());
-  es.onerror = () => { es.close(); if (!lastRun) api(`/api/runs/${id}`).then((r) => renderRun(r, open)).catch(() => toast("Run not found")); };
-  current.cleanup = () => es.close();
+  es.onerror = () => {
+    // Live connection dropped (slow server, restart). Keep checking until the run has a decision.
+    es.close();
+    if (poll) return;
+    const check = () => api(`/api/runs/${id}`).then((r) => {
+      lastRun = r; renderRun(r, open);
+      if (r.status === "done") { clearInterval(poll); poll = null; }
+    }).catch(() => {});
+    check();
+    poll = setInterval(check, 2500);
+  };
+  current.cleanup = () => { es.close(); if (poll) clearInterval(poll); };
 }
 
 function keyCard(st, i, title, live = true) {
@@ -282,6 +504,14 @@ function renderRun(run, open) {
     `<div class="decision pending"><div class="decision-top"><span class="decision-status" style="color:var(--ink-3)">Working…</span>${pill(null)}</div>
      <div class="muted">${steps.filter((s) => ["pass", "warn", "fail", "skip"].includes(s.status)).length} of ${steps.length} steps complete</div></div>`;
   if (decided) bindDecision(run);
+  // Audit report, editable fields and timeline: drawn once per finished run so typing is never wiped.
+  const after = $("#after-decision");
+  const sig = decided && dec && dec.data ? run.id + "|" + (dec.data.why || "") + "|" + ((run.meta || {}).timeline || []).length + "|" + !!run.review : "pending";
+  if (after.dataset.sig !== sig) {
+    after.dataset.sig = sig;
+    after.innerHTML = decided && dec && dec.data && dec.data.audit ? auditPanel(dec.data) + extractedPanel(run, dec.data) + timelinePanel(run) : "";
+    if (decided) bindExtracted(run);
+  }
 }
 
 function checksList(checks) {
@@ -413,7 +643,9 @@ async function openDrawer(id) {
       <div class="key-grid two-col">${KEY_CHECKS.map(([k, t], i) => keyCard(byId[k], i, t)).join("")}</div>
       <div class="panel" style="box-shadow:none">${stdLine(byId.standard)}</div>
       ${dec ? decisionCard(dec, r) : ""}
-      <a class="btn secondary" href="#process-run-${r.id}">Open the step-by-step run</a>`;
+      ${dec && dec.audit ? `<div class="detail-rows"><div><span>Audit score</span><span>${dec.audit.score} / 100 · ${esc(dec.audit.label)}</span></div><div><span>Extraction confidence</span><span>${dec.extraction_confidence}%</span></div></div>` : ""}
+      ${timelinePanel(r)}
+      <a class="btn secondary" href="#process-run-${r.id}">Open the full run to edit fields</a>`;
     bindDecision(r, body, (fresh) => { draw(fresh); if (current.view !== "process") route(); });
     body.querySelector('a[href^="#process-run"]').addEventListener("click", closeDrawer);
   };
@@ -451,7 +683,9 @@ async function viewRules() {
   app.innerHTML = `<div class="page-head"><div><h1 class="page-title">Rules and thresholds</h1>
     <p class="lede">The extractor only reads the invoice. These rules make every decision, so a change here changes the outcome of the next run.</p></div></div>
     <div class="stack">
-      <section class="panel"><div class="panel-head"><h2 class="section-title">Thresholds</h2><button class="btn" id="save">Save changes</button></div><div class="rules-grid" id="rules"></div></section>
+      <section class="panel"><div class="panel-head"><h2 class="section-title">Thresholds</h2>
+        <div class="row"><button class="btn secondary" id="simulate">Simulate before saving</button><button class="btn" id="save">Save changes</button></div></div>
+        <div class="rules-grid" id="rules"></div><div id="sim-out"></div></section>
       <section class="panel panel-pad"><h2 class="section-title" style="margin-bottom:16px">How a decision is made</h2>
         <ol class="checklist">
           <li><span class="n">A</span><span><b>Approved</b><span class="muted">All four key checks and every standard check passed. Paid on the due date to the bank account on file.</span></span></li>
@@ -467,6 +701,25 @@ async function viewRules() {
   const draw = (rs) => ($("#rules").innerHTML = rs.map((r) => `<div class="rule"><div><label for="r-${r.key}"><b>${esc(r.label)}</b></label>
     <div class="muted" style="font-size:13.5px">${esc(r.help)}</div></div><input class="field" type="number" step="any" id="r-${r.key}" data-key="${r.key}" value="${r.value}"></div>`).join(""));
   draw(rules);
+  const values = () => { const b = {}; document.querySelectorAll("[data-key]").forEach((i) => (b[i.dataset.key] = Number(i.value))); return b; };
+  $("#simulate").addEventListener("click", async () => {
+    $("#sim-out").innerHTML = `<div class="panel-pad muted">Re-deciding every processed invoice with these values…</div>`;
+    const r = await api("/api/simulate", { method: "POST", body: JSON.stringify(values()) });
+    const sm = r.summary, diff = sm.Approved.after - sm.Approved.before;
+    const delta = (k) => { const d = sm[k].after - sm[k].before; return d ? `<span class="${d > 0 ? "up" : "down"}">${d > 0 ? "+" : ""}${d}</span>` : '<span class="muted">no change</span>'; };
+    const headline = !r.total ? "Process some invoices first; the simulation replays them."
+      : !r.changed.length ? `None of the ${r.total} processed invoices would get a different decision.`
+      : diff > 0 ? `With these rules, ${diff} more invoice${diff > 1 ? "s" : ""} would have been approved automatically.`
+      : diff < 0 ? `With these rules, ${-diff} fewer invoice${diff < -1 ? "s" : ""} would have been approved automatically.`
+      : `${r.changed.length} invoice${r.changed.length > 1 ? "s" : ""} would get a different decision.`;
+    $("#sim-out").innerHTML = `<div class="sim">
+      <div class="sim-head"><div class="eyebrow">Simulation · nothing saved yet</div><div class="sim-title">${esc(headline)}</div></div>
+      <div class="sim-sum">${["Approved", "Needs review", "Rejected"].map((k) => `<div class="cnt ${statusClass(k)}"><span>${k}</span><b class="num">${sm[k].before} → ${sm[k].after}</b>${delta(k)}</div>`).join("")}</div>
+      ${r.changed.length ? `<div class="table-wrap"><table><thead><tr><th>Invoice</th><th>Today</th><th>With these rules</th><th>Why</th></tr></thead><tbody>
+        ${r.changed.map((c) => `<tr><td><div class="cell-main">${esc(c.vendor_name || "-")}</div><div class="cell-sub">${esc(c.invoice_number || c.filename)}</div></td>
+          <td>${pill(c.before)}</td><td>${pill(c.after)}</td><td class="cell-sub" style="max-width:420px">${esc(c.why)}</td></tr>`).join("")}</tbody></table></div>` : ""}
+      <div class="muted" style="font-size:13px">Every processed invoice was re-decided in the order it arrived, using the values already read. Click "Save changes" to use these rules for new invoices.</div></div>`;
+  });
   $("#save").addEventListener("click", async () => {
     const body = {};
     document.querySelectorAll("[data-key]").forEach((i) => (body[i.dataset.key] = Number(i.value)));

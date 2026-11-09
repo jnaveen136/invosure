@@ -303,20 +303,55 @@ OR = dict(vendor="Orion Electrical Contractors",
           bank=us_bank("6100 4428 1990", "061000052", "Southern Trust Bank"))
 BP_BANK = us_bank("7781 2290 4410", "026009593", "Texas Commerce Bank")
 
-G_HAPPY = "Happy path"
+G_HAPPY = "Clean invoices (happy path)"
 G1 = "1. Split invoices"
 G2 = "2. Duplicate invoices"
 G3 = "3. Partial delivery"
 G4 = "4. Missing or conflicting information"
 GS = "Standard checks (simple pass or fail)"
+GT = "Same-time processing"
+HB = dict(vendor="Harbor Furniture Co",
+          vendor_addr=["1800 Lakeshore Industrial Dr", "Cleveland, OH 44114", "Tax ID: 45-6612309"],
+          bank=us_bank("3300 1278 4455", "044000037", "Great Lakes Commerce Bank"))
 
 SAMPLES = [
     # ---------------------------------------------------------------- happy path
-    dict(file="01_clean_invoice_northwind.pdf", group=G_HAPPY, label="Clean invoice, everything matches",
+    dict(file="01_clean_invoice_northwind.pdf", group=G_HAPPY, label="Clean invoice, three lines, everything matches",
          expect="Approved", layout="A", **NW,
          meta=[("Invoice No", "NW-24817"), ("Invoice Date", "2026-10-28"), ("Due Date", "2026-11-27"), ("PO Number", "PO-1001")],
          lines=lines(("A4 copier paper (box of 5 reams)", 40, 42.50), ("Ink cartridges black", 25, 38.00), ("Desk organizers", 30, 12.75)),
          totals=us_totals(3032.50)),
+
+    dict(file="02_clean_supplies_northwind.pdf", group=G_HAPPY, label="Office supplies, delivered in full",
+         expect="Approved", layout="A", **NW,
+         meta=[("Invoice No", "NW-24880"), ("Invoice Date", "2026-11-04"), ("Due Date", "2026-12-04"), ("PO Number", "PO-1018")],
+         lines=lines(("Printer toner black", 12, 64.00), ("Copy paper letter (case)", 15, 38.50)),
+         totals=us_totals(1345.50)),
+    dict(file="03_clean_freight_bluepeak.pdf", group=G_HAPPY, label="Freight service, different invoice layout",
+         expect="Approved", layout="B", **BP, bank=BP_BANK,
+         meta=[("Bill #", "BL-77201"), ("Date of issue:", "November 5, 2026"), ("Payment due:", "November 20, 2026"), ("Your order ref:", "PO-1019")],
+         lines=[("Freight Chicago to Denver (FTL)", 2, 2150.00, 4300.00)],
+         totals=[("Net amount", usd(4300)), ("Tax (exempt)", usd(0)), ("Amount due", usd(4300))]),
+    dict(file="04_clean_subscription_summit.pdf", group=G_HAPPY, label="Monthly cloud subscription, two service lines",
+         expect="Approved", layout="D", **SC,
+         meta=[("Invoice #:", "SC-3417"), ("Date:", "11/05/2026"), ("Due:", "12/05/2026"), ("PO:", "PO-1020")],
+         lines=[("Cloud hosting November", 1, 4200.00, 4200.00), ("Support plan Premium November", 1, 900.00, 900.00)],
+         totals=[("Subtotal", num(5100)), ("Tax", num(0)), ("Total", usd(5100))]),
+    dict(file="05_clean_small_service_greenleaf.pdf", group=G_HAPPY, label="Small one-line service invoice",
+         expect="Approved", layout="D", **GL,
+         meta=[("Invoice #:", "GL-10412"), ("Date:", "11/04/2026"), ("Due:", "12/04/2026"), ("PO:", "PO-1021")],
+         lines=[("Pest control service November", 1, 350.00, 350.00)],
+         totals=[("Subtotal", num(350)), ("Tax", num(0)), ("Total", usd(350))]),
+    dict(file="06_clean_hardware_brightline.pdf", group=G_HAPPY, label="Hardware with sales tax, goods received",
+         expect="Approved", layout="B", **BL,
+         meta=[("Bill #", "BLE-5582"), ("Date of issue:", "November 5, 2026"), ("Payment due:", "December 5, 2026"), ("Your order ref:", "PO-1022")],
+         lines=[("USB-C hubs", 20, 39.00, 780.00)],
+         totals=[("Net amount", usd(780)), ("Sales tax 8.25%", usd(64.35)), ("Amount due", usd(844.35))]),
+    dict(file="07_clean_catering_meridian.pdf", group=G_HAPPY, label="Recurring office service",
+         expect="Approved", layout="D", **MD,
+         meta=[("Invoice #:", "MC-5590"), ("Date:", "11/06/2026"), ("Due:", "11/21/2026"), ("PO:", "PO-1023")],
+         lines=[("Office coffee service November", 1, 620.00, 620.00)],
+         totals=[("Subtotal", num(620)), ("Sales tax 8.25%", num(51.15)), ("Total", usd(671.15))]),
 
     # ---------------------------------------------------------------- 1. split invoices
     dict(file="02_split_po_third_invoice_northwind.pdf", group=G1, label="Third invoice on one PO, stays within what is left",
@@ -396,6 +431,18 @@ SAMPLES = [
          lines=lines(("A3 printer paper (ream)", 20, 31.00), ("Binder clips (box)", 30, 4.50)),
          totals=us_totals(755.00)),
 
+    # ---------------------------------------------------------------- same-time processing
+    dict(file="22_same_time_a_harbor.pdf", group=GT, label="$15,000 against a PO with $20,000 left (run with the next one)",
+         expect="Approved", layout="A", **HB,
+         meta=[("Invoice No", "HF-1101"), ("Invoice Date", "2026-11-06"), ("Due Date", "2026-12-06"), ("PO Number", "PO-1026")],
+         lines=lines(("Ergonomic desk chairs", 30, 500.00)),
+         totals=[("Subtotal", usd(15000)), ("Sales Tax (exempt)", usd(0)), ("Total Due", usd(15000))]),
+    dict(file="23_same_time_b_harbor.pdf", group=GT, label="Another $15,000 on the same PO, arriving at the same moment",
+         expect="Rejected", layout="A", **HB,
+         meta=[("Invoice No", "HF-1102"), ("Invoice Date", "2026-11-07"), ("Due Date", "2026-12-07"), ("PO Number", "PO-1026")],
+         lines=lines(("Ergonomic desk chairs", 30, 500.00)),
+         totals=[("Subtotal", usd(15000)), ("Sales Tax (exempt)", usd(0)), ("Total Due", usd(15000))]),
+
     # ---------------------------------------------------------------- standard checks
     dict(file="16_bank_account_changed_bluepeak.pdf", group=GS, label="Bank account on the invoice differs from our records",
          expect="Rejected", layout="B", **BP,
@@ -423,7 +470,9 @@ def main():
     for old in OUT.glob("*.pdf"):  # the folder is fully regenerated
         old.unlink()
     index = []
-    for s in SAMPLES:
+    import re
+    for i, s in enumerate(SAMPLES, 1):  # file numbers follow the list order
+        s["file"] = f"{i:02d}_" + re.sub(r"^\d+_", "", s["file"])
         render(s, OUT / s["file"], scanned=s.get("scanned", False))
         index.append({"file": s["file"], "group": s["group"], "label": s["label"], "expect": s["expect"]})
     (OUT / "index.json").write_text(json.dumps(index, indent=2))

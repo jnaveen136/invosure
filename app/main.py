@@ -27,6 +27,11 @@ STAGE_DELAY = float(os.environ.get("STAGE_DELAY", "0.45"))
 
 app = FastAPI(title="InvoSure")
 store.init_db()
+# A run left "running" from before a restart (for example a server that ran out of memory) will never
+# finish on its own, so close it with a clear message instead of leaving the screen spinning.
+for _r in store.list_runs():
+    if _r["status"] != "done":
+        pipeline.finish_interrupted(_r, "The server restarted while this invoice was being processed.")
 app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
 
 
@@ -55,6 +60,7 @@ def start_run(path: Path, filename: str) -> str:
     dest.write_bytes(raw)
     run = {"id": run_id, "created_at": datetime.now().isoformat(timespec="seconds"), "filename": filename,
            "file_path": str(dest), "file_hash": hashlib.sha256(raw).hexdigest(), "status": "running",
+           "meta": {"timeline": [{"at": datetime.now().isoformat(timespec="seconds"), "text": f"Invoice received: {filename}", "kind": "info"}]},
            "stages": [{"id": s, "name": n, "status": "pending"} for s, n in pipeline.STAGES]}
     store.save_run(run)
     threading.Thread(target=pipeline.run_pipeline, args=(run, STAGE_DELAY), daemon=True).start()
@@ -85,6 +91,58 @@ def run_sample(req: SampleReq):
     if p.parent != SAMPLES.resolve() or not p.exists():
         raise HTTPException(404, "Unknown sample")
     return {"id": start_run(p, req.file)}
+
+
+class BatchReq(BaseModel):
+    files: list[str]
+
+
+@app.post("/api/runs/batch")
+def run_batch(req: BatchReq):
+    """Start several test invoices at the same moment (used to show safe same-time processing)."""
+    paths = []
+    for f in req.files[:6]:
+        p = (SAMPLES / f).resolve()
+        if p.parent != SAMPLES.resolve() or not p.exists():
+            raise HTTPException(404, f"Unknown sample {f}")
+        paths.append(p)
+    return {"ids": [start_run(p, p.name) for p in paths]}
+
+
+class CorrectReq(BaseModel):
+    fields: dict
+
+
+@app.post("/api/runs/{run_id}/correct")
+def correct(run_id: str, req: CorrectReq):
+    """Apply a reviewer's corrections to extracted fields and run every check again."""
+    r = store.get_run(run_id)
+    if not r or r["status"] != "done":
+        raise HTTPException(404, "Invoice not found or still running")
+    allowed = {k for k, _, _ in pipeline.EDITABLE_FIELDS}
+    changes = {k: v for k, v in req.fields.items() if k in allowed}
+    if not changes:
+        raise HTTPException(400, "Nothing to correct")
+    meta = r.get("meta") or {}
+    if not meta.get("extracted"):
+        raise HTTPException(400, "This invoice was processed before corrections were supported; process it again")
+    meta.setdefault("overrides", {}).update(changes)
+    meta["reuse"] = True
+    names = ", ".join(lbl.lower() for k, lbl, _ in pipeline.EDITABLE_FIELDS if k in changes)
+    meta.setdefault("timeline", []).append({"at": datetime.now().isoformat(timespec="seconds"),
+                                            "text": f"Corrected by reviewer: {names}. All checks run again.", "kind": "info"})
+    if r.get("review"):
+        meta.setdefault("timeline", []).append({"at": datetime.now().isoformat(timespec="seconds"),
+                                                "text": "Earlier reviewer decision cleared because the data changed.", "kind": "warn"})
+    r.update(meta=meta, review=None, status="running", decision=None, final_status=None)
+    store.save_run(r)
+    threading.Thread(target=pipeline.run_pipeline, args=(r, min(STAGE_DELAY, 0.15)), daemon=True).start()
+    return {"id": run_id}
+
+
+@app.post("/api/simulate")
+def simulate(body: dict):
+    return pipeline.simulate(body)
 
 
 @app.get("/api/samples")
@@ -170,7 +228,7 @@ def run_pages(run_id: str):
 async def stream(run_id: str):
     async def gen():
         last = None
-        for _ in range(1200):
+        for _ in range(4000):
             r = store.get_run(run_id)
             if not r:
                 yield "event: error\ndata: {}\n\n"
@@ -206,35 +264,53 @@ def review(run_id: str, req: ReviewReq):
     r["final_status"] = "Approved" if req.action == "approve" else "Rejected"
     r["review"] = {"action": req.action, "note": req.note.strip(), "by": req.reviewer,
                    "at": datetime.now().isoformat(timespec="seconds"), "from": r["decision"]}
+    meta = r.get("meta") or {}
+    meta.setdefault("timeline", []).append({"at": r["review"]["at"], "kind": "pass" if req.action == "approve" else "fail",
+                                            "text": f"{'Approved' if req.action == 'approve' else 'Rejected'} by {req.reviewer}: {req.note.strip()}"})
+    r["meta"] = meta
     store.save_run(r)
     return slim(r)
 
 
+def run_confidence(r):
+    for st in r.get("stages") or []:
+        if st.get("id") == "decide" and isinstance(st.get("data"), dict):
+            return st["data"].get("extraction_confidence")
+    return None
+
+
 @app.get("/api/stats")
 def stats():
-    rs = [r for r in store.list_runs() if r["status"] == "done"]
+    rs = sorted([r for r in store.list_runs() if r["status"] == "done"], key=lambda r: r["created_at"])
+    n = len(rs)
     by = Counter(r["final_status"] for r in rs)
-    auto = sum(1 for r in rs if r["decision"] == "Approved")
-    issues = Counter()
-    for r in rs:
-        for i in (r.get("result") or {}).get("issues", []):
-            issues[i["code"]] += 1
-    value = lambda st: round(sum(r["total"] or 0 for r in rs if r["final_status"] == st and r["doc_type"] != "credit_note"), 2)
-    keys = {k: Counter() for k, _ in pipeline.KEY_CHECKS}
-    for r in rs:
-        for st in r.get("stages") or []:
-            if st.get("id") in keys:
-                keys[st["id"]][st.get("outcome", "na")] += 1
-    key_stats = [{"id": k, "title": t, **{o: keys[k].get(o, 0) for o in ("pass", "review", "reject", "na")}}
-                 for k, t in pipeline.KEY_CHECKS]
+    sys_by = Counter(r["decision"] for r in rs)
+    confs = [run_confidence(r) for r in rs]
+    buckets = [("95-100%", 95, 101), ("80-94%", 80, 95), ("50-79%", 50, 80), ("0-49%", 0, 50)]
+    dist = [{"label": b, "count": sum(1 for x in confs if x is not None and lo <= x < hi)} for b, lo, hi in buckets]
+    series, auto = [], 0
+    for i, r in enumerate(rs, 1):  # straight-through rate as invoices came in
+        auto += r["decision"] == "Approved"
+        series.append({"n": i, "rate": round(auto / i * 100, 1), "file": r["filename"], "status": r["decision"]})
+    at_risk = [r for r in rs if r["final_status"] in ("Needs review", "Rejected")]
+    recent = []
+    for r in reversed(rs[-8:]):
+        recent.append({"id": r["id"], "invoice_number": r["invoice_number"], "vendor_name": r["vendor_name"],
+                       "invoice_date": r["invoice_date"], "total": r["total"], "currency": r["currency"],
+                       "final_status": r["final_status"], "confidence": run_confidence(r), "filename": r["filename"]})
+    days = [r["created_at"][:10] for r in rs]
     return {
-        "key_stats": key_stats,
-        "processed": len(rs),
+        "processed": n,
         "approved": by.get("Approved", 0), "on_hold": by.get("Needs review", 0), "rejected": by.get("Rejected", 0),
-        "auto_rate": round(auto / len(rs) * 100) if rs else 0,
-        "value_processed": round(sum(abs(r["total"] or 0) for r in rs), 2),
-        "value_approved": value("Approved"), "value_on_hold": value("Needs review"), "value_blocked": value("Rejected"),
-        "top_issues": issues.most_common(6),
+        "decisions": {"Approved": sys_by.get("Approved", 0), "Needs review": sys_by.get("Needs review", 0), "Rejected": sys_by.get("Rejected", 0)},
+        "auto_rate": round(sys_by.get("Approved", 0) / n * 100) if n else 0,
+        "high_conf": dist[0]["count"],
+        "exceptions": len(at_risk),
+        "value_at_risk": round(sum(r["total"] or 0 for r in at_risk), 2),
+        "value_approved": round(sum(r["total"] or 0 for r in rs if r["final_status"] == "Approved"), 2),
+        "avg_confidence": round(sum(x for x in confs if x is not None) / max(1, sum(1 for x in confs if x is not None)), 1),
+        "series": series, "confidence_dist": dist, "recent": recent,
+        "first_day": days[0] if days else None, "last_day": days[-1] if days else None,
         "extractor": f"Claude ({extract.CLAUDE_MODEL})" if extract.claude_available() else "Built-in parser",
     }
 
