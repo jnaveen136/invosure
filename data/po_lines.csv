@@ -1,0 +1,27 @@
+po_number,line_no,description,qty,unit_price,line_type
+PO-0985,1,Deep cleaning September,1,1100.00,service
+PO-0990,1,Toner cartridges assorted,30,41.50,goods
+PO-0992,1,Freight Chicago to Memphis (LTL),2,1590.00,service
+PO-1001,1,A4 copier paper (box of 5 reams),40,42.50,goods
+PO-1001,2,Ink cartridges black,25,38.00,goods
+PO-1001,3,Desk organizers,30,12.75,goods
+PO-1002,1,Freight Chicago to Dallas (FTL),6,1850.00,service
+PO-1002,2,Fuel surcharge,1,640.00,service
+PO-1003,1,Cloud hosting October,1,4200.00,service
+PO-1003,2,Support plan Premium,1,900.00,service
+PO-1004,1,Ergonomic office chairs,60,189.00,goods
+PO-1004,2,Standing desks,20,412.00,goods
+PO-1006,1,Laptop docking stations,25,214.00,goods
+PO-1006,2,24 inch monitors,25,179.00,goods
+PO-1007,1,Whiteboard markers (pack),50,9.80,goods
+PO-1007,2,Sticky notes (12 pack),40,14.25,goods
+PO-1008,1,Data backup service October,1,1250.00,service
+PO-1009,1,Warehouse storage October,1,3400.00,service
+PO-1012,1,Office cleaning October,1,2400.00,service
+PO-1012,2,Window cleaning,1,480.00,service
+PO-1013,1,Team lunch catering Oct 30,1,1500.00,service
+PO-1014,1,Electrical panel upgrade Building B - materials,1,24500.00,service
+PO-1014,2,Electrical panel upgrade Building B - labour,1,24000.00,service
+PO-1016,1,Wireless keyboards,40,49.00,goods
+PO-1017,1,A3 printer paper (ream),20,31.00,goods
+PO-1017,2,Binder clips (box),30,4.50,goods

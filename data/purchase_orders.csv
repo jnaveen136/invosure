@@ -1,0 +1,17 @@
+po_number,vendor_id,po_date,currency,status,buyer
+PO-0985,V005,2026-09-01,USD,closed,Priya Nair
+PO-0990,V001,2026-09-02,USD,closed,Priya Nair
+PO-0992,V002,2026-09-20,USD,closed,Marcus Webb
+PO-1001,V001,2026-10-06,USD,open,Priya Nair
+PO-1002,V002,2026-10-01,USD,open,Marcus Webb
+PO-1003,V003,2026-10-01,USD,open,Daniel Ortiz
+PO-1004,V001,2026-09-15,USD,open,Priya Nair
+PO-1006,V007,2026-10-03,USD,open,Daniel Ortiz
+PO-1007,V001,2026-10-12,USD,open,Priya Nair
+PO-1008,V003,2026-10-01,USD,open,Daniel Ortiz
+PO-1009,V002,2026-10-01,USD,open,Marcus Webb
+PO-1012,V005,2026-10-01,USD,open,Priya Nair
+PO-1013,V009,2026-10-15,USD,open,Priya Nair
+PO-1014,V006,2026-09-28,USD,open,Marcus Webb
+PO-1016,V007,2026-10-08,USD,open,Daniel Ortiz
+PO-1017,V001,2026-10-14,USD,open,Priya Nair

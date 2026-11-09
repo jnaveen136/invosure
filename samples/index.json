@@ -1,0 +1,110 @@
+[
+  {
+    "file": "01_clean_invoice_northwind.pdf",
+    "group": "Happy path",
+    "label": "Clean invoice, everything matches",
+    "expect": "Approved"
+  },
+  {
+    "file": "02_split_po_third_invoice_northwind.pdf",
+    "group": "1. Split invoices",
+    "label": "Third invoice on one PO, stays within what is left",
+    "expect": "Approved"
+  },
+  {
+    "file": "03_split_po_overbilled_northwind.pdf",
+    "group": "1. Split invoices",
+    "label": "Another invoice on the same PO bills more chairs than were ordered",
+    "expect": "Rejected"
+  },
+  {
+    "file": "04_split_to_dodge_approval_limit_orion.pdf",
+    "group": "1. Split invoices",
+    "label": "Job split into two bills, each just under the approval limit",
+    "expect": "Needs review"
+  },
+  {
+    "file": "05_duplicate_already_paid_northwind.pdf",
+    "group": "2. Duplicate invoices",
+    "label": "Already paid in September, re-sent as a reminder copy",
+    "expect": "Rejected"
+  },
+  {
+    "file": "06_duplicate_number_reformatted_bluepeak.pdf",
+    "group": "2. Duplicate invoices",
+    "label": "Same invoice re-sent with the number written differently",
+    "expect": "Rejected"
+  },
+  {
+    "file": "07_possible_duplicate_bluepeak.pdf",
+    "group": "2. Duplicate invoices",
+    "label": "New number, but same amount as a bill from the day before",
+    "expect": "Needs review"
+  },
+  {
+    "file": "08_same_number_other_vendor_meridian.pdf",
+    "group": "2. Duplicate invoices",
+    "label": "Invoice number already used, but by a different vendor",
+    "expect": "Approved"
+  },
+  {
+    "file": "09_billed_more_than_delivered_brightline.pdf",
+    "group": "3. Partial delivery",
+    "label": "Bills all 25 monitors, only 18 have arrived",
+    "expect": "Needs review"
+  },
+  {
+    "file": "10_partial_delivery_billed_correctly_brightline.pdf",
+    "group": "3. Partial delivery",
+    "label": "30 of 40 keyboards delivered, invoice bills exactly 30",
+    "expect": "Approved"
+  },
+  {
+    "file": "11_missing_number_and_date_greenleaf.pdf",
+    "group": "4. Missing or conflicting information",
+    "label": "Invoice number and date are missing",
+    "expect": "Needs review"
+  },
+  {
+    "file": "12_totals_conflict_greenleaf.pdf",
+    "group": "4. Missing or conflicting information",
+    "label": "Line items add up to less than the stated total",
+    "expect": "Needs review"
+  },
+  {
+    "file": "13_no_po_number_inferred_summit.pdf",
+    "group": "4. Missing or conflicting information",
+    "label": "No PO number printed, the right PO is worked out",
+    "expect": "Approved"
+  },
+  {
+    "file": "14_wrong_po_number_printed_northwind.pdf",
+    "group": "4. Missing or conflicting information",
+    "label": "Printed PO belongs to another vendor, lines match a different PO",
+    "expect": "Needs review"
+  },
+  {
+    "file": "15_scanned_invoice_northwind.pdf",
+    "group": "4. Missing or conflicting information",
+    "label": "Scanned paper invoice, read with OCR",
+    "expect": "Approved"
+  },
+  {
+    "file": "16_bank_account_changed_bluepeak.pdf",
+    "group": "Standard checks (simple pass or fail)",
+    "label": "Bank account on the invoice differs from our records",
+    "expect": "Rejected"
+  },
+  {
+    "file": "17_unknown_vendor_apex.pdf",
+    "group": "Standard checks (simple pass or fail)",
+    "label": "Vendor is not in the approved vendor list",
+    "expect": "Rejected"
+  },
+  {
+    "file": "18_price_above_po_summit.pdf",
+    "group": "Standard checks (simple pass or fail)",
+    "label": "Price is 8.8% above the PO, over the tolerance",
+    "expect": "Rejected"
+  }
+]

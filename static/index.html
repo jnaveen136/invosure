@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>InvoSure</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:opsz,wght@6..72,500;6..72,600&family=Manrope:wght@400;500;600;700&display=swap">
+<link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="topbar-inner">
+    <a class="wordmark" href="#overview">Invo<span>Sure</span></a>
+    <nav class="tabs" id="tabs">
+      <a href="#overview" data-view="overview">Overview</a>
+      <a href="#process" data-view="process">Process invoice</a>
+      <a href="#invoices" data-view="invoices">Invoices</a>
+      <a href="#pos" data-view="pos">Purchase orders</a>
+      <a href="#rules" data-view="rules">Rules</a>
+    </nav>
+  </div>
+</header>
+
+<main id="app" class="wrap"></main>
+
+<aside class="drawer" id="drawer" hidden>
+  <div class="drawer-scrim" data-close></div>
+  <div class="drawer-panel" role="dialog" aria-label="Invoice detail">
+    <button class="icon-btn drawer-x" data-close aria-label="Close">
+      <svg viewBox="0 0 20 20" width="20" height="20"><path d="M5 5l10 10M15 5L5 15" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+    </button>
+    <div id="drawer-body"></div>
+  </div>
+</aside>
+
+<div class="toast" id="toast" hidden></div>
+<script src="/static/app.js"></script>
+</body>
+</html>

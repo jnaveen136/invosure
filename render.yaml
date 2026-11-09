@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: invosure
+    runtime: docker
+    plan: free
+    healthCheckPath: /api/samples
+    envVars:
+      - key: STAGE_DELAY
+        value: "0.45"

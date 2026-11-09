@@ -1,0 +1,10 @@
+vendor_id,name,aliases,tax_id,status,bank_account,bank_routing,currency,payment_terms_days,contact_email,phone
+V001,Northwind Office Supplies Inc.,Northwind Office Supplies|Northwind Supplies,84-2219034,active,441000981123,021000021,USD,30,billing@northwind-supplies.com,(312) 555-0148
+V002,Bluepeak Logistics LLC,Bluepeak Logistics|Bluepeak,47-1182650,active,778122904410,026009593,USD,15,ar@bluepeaklogistics.com,(469) 555-0192
+V003,Summit Cloud Services Ltd,Summit Cloud Services|Summit Cloud,91-5530217,active,302211875540,121000248,USD,30,invoices@summitcloud.io,(415) 555-0107
+V004,Kessler Industrial GmbH,Kessler Industrial,DE298113745,active,DE44500105175407324931,INGDDEFFXXX,USD,45,rechnung@kessler-industrial.de,+49 69 5550 3321
+V005,Greenleaf Facility Services,Greenleaf Facilities|Greenleaf,36-7712094,active,550019823377,071000013,USD,30,accounts@greenleaffs.com,(773) 555-0163
+V006,Orion Electrical Contractors,Orion Electrical,52-3390118,active,610044281990,061000052,USD,30,billing@orionelectrical.com,(404) 555-0175
+V007,Brightline Electronics Corp,Brightline Electronics|Brightline,27-6650431,active,229077651204,111000025,USD,30,ar@brightline-elec.com,(214) 555-0139
+V008,Redstone Staffing Partners,Redstone Staffing,33-1209875,blocked,880011223344,021000089,USD,30,payroll@redstonestaff.com,(646) 555-0120
+V009,Meridian Catering Co,Meridian Catering,61-4478210,active,190033446672,091000019,USD,15,hello@meridiancatering.com,(612) 555-0184
