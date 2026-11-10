@@ -16,6 +16,7 @@ import base64
 import json
 import os
 import re
+import time
 import urllib.error
 import urllib.request
 from datetime import date, datetime
@@ -24,7 +25,8 @@ import pdfplumber
 
 CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-opus-5-5")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-flash-latest")
-GEMINI_TIMEOUT = float(os.environ.get("GEMINI_TIMEOUT", "60"))
+GEMINI_FALLBACK_MODELS = os.environ.get("GEMINI_FALLBACK_MODELS", "gemini-flash-lite-latest")
+GEMINI_TIMEOUT = float(os.environ.get("GEMINI_TIMEOUT", "45"))
 
 # --------------------------------------------------------------------------- reading
 
@@ -436,21 +438,47 @@ def _gemini_call(model: str, key: str, body: dict) -> dict:
         raise RuntimeError(f"Gemini HTTP {e.code}: {detail[:200]}") from None
 
 
-def extract_with_gemini(path: str) -> dict:
-    """Same job as the Claude reader, through Google's free-tier Gemini API (plain HTTPS, no extra package)."""
-    key = os.environ["GEMINI_API_KEY"]
-    data = base64.standard_b64encode(open(path, "rb").read()).decode()
+def _gemini_once(model: str, key: str, data: str) -> dict:
     parts = [{"inline_data": {"mime_type": "application/pdf", "data": data}}, {"text": PROMPT}]
     config = {"temperature": 0, "responseMimeType": "application/json", "responseJsonSchema": SCHEMA}
     try:
-        resp = _gemini_call(GEMINI_MODEL, key, {"contents": [{"parts": parts}], "generationConfig": config})
+        return _gemini_call(model, key, {"contents": [{"parts": parts}], "generationConfig": config})
     except RuntimeError as e:
         if "HTTP 400" not in str(e):
             raise
         # Older models reject responseJsonSchema: ask for the same JSON shape in the prompt instead.
         parts[1] = {"text": PROMPT + "\n\nReturn only JSON matching this JSON Schema:\n" + json.dumps(SCHEMA)}
-        resp = _gemini_call(GEMINI_MODEL, key, {"contents": [{"parts": parts}],
-                                                "generationConfig": {"temperature": 0, "responseMimeType": "application/json"}})
+        return _gemini_call(model, key, {"contents": [{"parts": parts}],
+                                         "generationConfig": {"temperature": 0, "responseMimeType": "application/json"}})
+
+
+BUSY = ("HTTP 429", "HTTP 500", "HTTP 502", "HTTP 503", "HTTP 504", "timed out")
+
+
+def extract_with_gemini(path: str) -> dict:
+    """Same job as the Claude reader, through Google's free-tier Gemini API (plain HTTPS, no extra package).
+    The free tier is often busy, so a busy model is retried once and then the next model in the list is tried."""
+    key = os.environ["GEMINI_API_KEY"]
+    data = base64.standard_b64encode(open(path, "rb").read()).decode()
+    models = [GEMINI_MODEL] + [m.strip() for m in GEMINI_FALLBACK_MODELS.split(",") if m.strip() and m.strip() != GEMINI_MODEL]
+    last = None
+    for model in models:
+        for attempt in range(2):
+            try:
+                resp = _gemini_once(model, key, data)
+                out = _parse_gemini(resp)
+                out["reader"] = f"Gemini ({model})"
+                return out
+            except (RuntimeError, TimeoutError, urllib.error.URLError) as e:
+                last = e
+                if not any(b in str(e) for b in BUSY) and not isinstance(e, (TimeoutError, urllib.error.URLError)):
+                    raise  # a real error (bad key, bad answer): retrying will not help
+                if attempt == 0:
+                    time.sleep(1.5)
+    raise RuntimeError(f"all Gemini models busy ({', '.join(models)}). Last: {last}")
+
+
+def _parse_gemini(resp: dict) -> dict:
     cands = resp.get("candidates") or []
     if not cands:
         raise RuntimeError("Gemini returned no answer: " + str(resp.get("promptFeedback", {}).get("blockReason", "unknown")))

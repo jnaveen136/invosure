@@ -226,7 +226,7 @@ def s_extract(c: Ctx):
         label, read_fn = reader
         try:
             result = read_fn(c.path)
-            c.extractor = label
+            c.extractor = result.pop("reader", label)  # the model that actually answered
         except Exception as e:
             print(f"[extract] {label} failed: {e!r}")
             checks.append(chk(f"{label.split(' ')[0]} extraction", "warn",
