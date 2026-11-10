@@ -450,7 +450,7 @@ def stats():
         "avg_confidence": round(sum(x for x in confs if x is not None) / max(1, sum(1 for x in confs if x is not None)), 1),
         "series": series, "confidence_dist": dist, "recent": recent,
         "first_day": days[0] if days else None, "last_day": days[-1] if days else None,
-        "extractor": f"Claude ({extract.CLAUDE_MODEL})" if extract.claude_available() else "Built-in parser",
+        "extractor": (extract.ai_reader() or ("Built-in parser",))[0],
     }
 
 

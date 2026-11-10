@@ -14,13 +14,15 @@ uvicorn app.main:app --port 8000
 
 Open http://localhost:8000. The 24 test invoices are already in `samples/`. To regenerate them, run `python scripts/make_samples.py`.
 
-Optional: set `ANTHROPIC_API_KEY` to have Claude read the invoices instead of the built-in parser. The decision rules are the same either way. If Claude fails, the run falls back to the built-in parser and says so in the "Extract" step.
+Optional: have an AI model read the invoices instead of the built-in parser. Set `GEMINI_API_KEY` (free key from aistudio.google.com) or `ANTHROPIC_API_KEY`; Claude is used if both are set. The decision rules are the same either way. If the AI reader fails (no quota, network error), the run falls back to the built-in parser and says so in the "Extract" step.
 
 | Variable | Default | Meaning |
 |---|---|---|
+| `GEMINI_API_KEY` | unset | Turns on Gemini extraction (free tier) |
+| `GEMINI_MODEL` | `gemini-flash-latest` | Gemini model used for extraction |
 | `ANTHROPIC_API_KEY` | unset | Turns on Claude extraction |
-| `CLAUDE_MODEL` | `claude-opus-5-5` | Model used for extraction |
-| `EXTRACTOR` | `auto` | Set to `builtin` to force the local parser |
+| `CLAUDE_MODEL` | `claude-opus-5-5` | Claude model used for extraction |
+| `EXTRACTOR` | `auto` | `builtin` forces the local parser; `gemini` or `claude` picks one AI reader |
 | `STAGE_DELAY` | `0.45` | Seconds between steps so the live view is easy to follow |
 | `TODAY` | system date | Pin "today" (YYYY-MM-DD) for repeatable demos |
 

@@ -3,8 +3,9 @@
 Two extractors share one output shape:
   * Built-in parser - pdf text layer (pdfplumber) or OCR (tesseract) + label rules.
     Always available, deterministic, no network.
-  * Claude - used when ANTHROPIC_API_KEY is set. Reads the PDF directly (text or
-    scanned) and returns JSON that matches a fixed schema.
+  * AI reader - Claude when ANTHROPIC_API_KEY is set, otherwise Gemini (free tier)
+    when GEMINI_API_KEY is set. Reads the PDF directly (text or scanned) and
+    returns JSON that matches a fixed schema. If it fails, the built-in parser runs.
 
 Either way, the extractor only reports what is printed. All business decisions
 happen later in rules.py, so the decision logic is the same whichever extractor ran.
@@ -15,11 +16,15 @@ import base64
 import json
 import os
 import re
+import urllib.error
+import urllib.request
 from datetime import date, datetime
 
 import pdfplumber
 
 CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-opus-5-5")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-flash-latest")
+GEMINI_TIMEOUT = float(os.environ.get("GEMINI_TIMEOUT", "60"))
 
 # --------------------------------------------------------------------------- reading
 
@@ -382,7 +387,18 @@ def extract_with_claude(path: str) -> dict:
     if resp.stop_reason == "refusal":
         raise RuntimeError("model declined the request")
     text = next(b.text for b in resp.content if b.type == "text")
-    f = json.loads(text)
+    return _finish(json.loads(text))
+
+
+def _finish(f: dict) -> dict:
+    """Normalise what an AI reader returned into the same shape the built-in parser produces."""
+    for key in SCHEMA["required"]:
+        f.setdefault(key, [] if key == "line_items" else (False if SCHEMA["properties"][key].get("type") == "boolean" else None))
+    f["currency"] = (f.get("currency") or "USD").upper()
+    f["line_items"] = [i for i in (f.get("line_items") or []) if isinstance(i, dict) and i.get("description")]
+    for i in f["line_items"]:
+        for k in ("qty", "unit_price", "amount"):
+            i[k] = float(i.get(k) or 0)
     if f.get("po_number"):
         digits = re.sub(r"\D", "", f["po_number"])
         f["po_number"] = f"PO-{digits}" if digits else None
@@ -397,4 +413,62 @@ def extract_with_claude(path: str) -> dict:
 
 
 def claude_available() -> bool:
-    return bool(os.environ.get("ANTHROPIC_API_KEY")) and os.environ.get("EXTRACTOR", "auto") != "builtin"
+    return bool(os.environ.get("ANTHROPIC_API_KEY")) and os.environ.get("EXTRACTOR", "auto") in ("auto", "claude")
+
+
+# --------------------------------------------------------------------------- Gemini extractor
+
+GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+
+
+def _gemini_call(model: str, key: str, body: dict) -> dict:
+    req = urllib.request.Request(GEMINI_URL.format(model=model), data=json.dumps(body).encode(), method="POST",
+                                 headers={"Content-Type": "application/json", "x-goog-api-key": key})
+    try:
+        with urllib.request.urlopen(req, timeout=GEMINI_TIMEOUT) as r:
+            return json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode(errors="replace")
+        try:
+            detail = json.loads(detail)["error"]["message"]
+        except Exception:
+            pass
+        raise RuntimeError(f"Gemini HTTP {e.code}: {detail[:200]}") from None
+
+
+def extract_with_gemini(path: str) -> dict:
+    """Same job as the Claude reader, through Google's free-tier Gemini API (plain HTTPS, no extra package)."""
+    key = os.environ["GEMINI_API_KEY"]
+    data = base64.standard_b64encode(open(path, "rb").read()).decode()
+    parts = [{"inline_data": {"mime_type": "application/pdf", "data": data}}, {"text": PROMPT}]
+    config = {"temperature": 0, "responseMimeType": "application/json", "responseJsonSchema": SCHEMA}
+    try:
+        resp = _gemini_call(GEMINI_MODEL, key, {"contents": [{"parts": parts}], "generationConfig": config})
+    except RuntimeError as e:
+        if "HTTP 400" not in str(e):
+            raise
+        # Older models reject responseJsonSchema: ask for the same JSON shape in the prompt instead.
+        parts[1] = {"text": PROMPT + "\n\nReturn only JSON matching this JSON Schema:\n" + json.dumps(SCHEMA)}
+        resp = _gemini_call(GEMINI_MODEL, key, {"contents": [{"parts": parts}],
+                                                "generationConfig": {"temperature": 0, "responseMimeType": "application/json"}})
+    cands = resp.get("candidates") or []
+    if not cands:
+        raise RuntimeError("Gemini returned no answer: " + str(resp.get("promptFeedback", {}).get("blockReason", "unknown")))
+    text = "".join(p.get("text", "") for p in (cands[0].get("content") or {}).get("parts", []))
+    if not text.strip():
+        raise RuntimeError(f"Gemini returned an empty answer ({cands[0].get('finishReason')})")
+    text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip())
+    return _finish(json.loads(text))
+
+
+def gemini_available() -> bool:
+    return bool(os.environ.get("GEMINI_API_KEY")) and os.environ.get("EXTRACTOR", "auto") in ("auto", "gemini")
+
+
+def ai_reader():
+    """The AI reader to use, as (label, function), or None for the built-in parser only."""
+    if claude_available():
+        return f"Claude ({CLAUDE_MODEL})", extract_with_claude
+    if gemini_available():
+        return f"Gemini ({GEMINI_MODEL})", extract_with_gemini
+    return None

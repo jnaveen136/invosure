@@ -7,3 +7,5 @@ services:
     envVars:
       - key: STAGE_DELAY
         value: "0.45"
+      - key: GEMINI_API_KEY
+        sync: false

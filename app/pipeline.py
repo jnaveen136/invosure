@@ -222,12 +222,15 @@ def s_extract(c: Ctx):
     if c.snapshot:
         result = copy.deepcopy({"fields": c.snapshot["fields"], "notes": c.snapshot["notes"]})
         c.extractor = c.snapshot.get("extractor", c.extractor)
-    elif extract.claude_available():
+    elif reader := extract.ai_reader():
+        label, read_fn = reader
         try:
-            result = extract.extract_with_claude(c.path)
-            c.extractor = f"Claude ({extract.CLAUDE_MODEL})"
+            result = read_fn(c.path)
+            c.extractor = label
         except Exception as e:
-            checks.append(chk("Claude extraction", "warn", f"Unavailable ({e.__class__.__name__}); used the built-in parser"))
+            print(f"[extract] {label} failed: {e!r}")
+            checks.append(chk(f"{label.split(' ')[0]} extraction", "warn",
+                              f"Unavailable ({e.__class__.__name__}: {str(e)[:120]}); used the built-in parser"))
     if result is None:
         result = extract.parse_text(c.doc["text"], ocr=c.doc["method"] == "ocr")
     if not c.snapshot and not c.sim:  # keep what was read, so corrections and simulations can re-check without re-reading
@@ -1010,7 +1013,7 @@ def field_confidence(c: Ctx):
     f = c.f
     ocr = c.doc.get("method") == "ocr"
     q = min(1.0, (c.doc.get("ocr_quality") or 0) / 100 + 0.05) if ocr else 1.0
-    base = 0.95 if c.extractor.startswith("Claude") else 0.97
+    base = 0.97 if c.extractor == "Built-in parser" else 0.95
     amounts_conflict = any(i["code"] == "totals_conflict" for i in c.issues)
     us_vendor = bool(c.vendor and re.fullmatch(r"\d{2}-\d{7}", c.vendor["tax_id"]))
     acct_file = extract.norm_account(c.vendor["bank_account"]) if c.vendor else None
