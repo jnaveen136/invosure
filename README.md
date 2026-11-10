@@ -19,8 +19,9 @@ Optional: have an AI model read the invoices instead of the built-in parser. Set
 | Variable | Default | Meaning |
 |---|---|---|
 | `GEMINI_API_KEY` | unset | Turns on Gemini extraction (free tier) |
-| `GEMINI_MODEL` | `gemini-flash-latest` | Gemini model used for extraction |
-| `GEMINI_FALLBACK_MODELS` | `gemini-flash-lite-latest` | Comma-separated models tried when the main one is busy (free tier often returns 503) |
+| `GEMINI_MODEL` | `gemini-flash-lite-latest` | Gemini model tried first (fast) |
+| `GEMINI_FALLBACK_MODELS` | `gemini-flash-latest` | Comma-separated models tried when the first is busy or slow |
+| `GEMINI_BUDGET` | `25` | Seconds Gemini may take in total (each call max `GEMINI_TIMEOUT`, 15) before the built-in parser takes over |
 | `ANTHROPIC_API_KEY` | unset | Turns on Claude extraction |
 | `CLAUDE_MODEL` | `claude-opus-5-5` | Claude model used for extraction |
 | `EXTRACTOR` | `auto` | `builtin` forces the local parser; `gemini` or `claude` picks one AI reader |

@@ -24,9 +24,10 @@ from datetime import date, datetime
 import pdfplumber
 
 CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-opus-5-5")
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-flash-latest")
-GEMINI_FALLBACK_MODELS = os.environ.get("GEMINI_FALLBACK_MODELS", "gemini-flash-lite-latest")
-GEMINI_TIMEOUT = float(os.environ.get("GEMINI_TIMEOUT", "45"))
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-flash-lite-latest")
+GEMINI_FALLBACK_MODELS = os.environ.get("GEMINI_FALLBACK_MODELS", "gemini-flash-latest")
+GEMINI_TIMEOUT = float(os.environ.get("GEMINI_TIMEOUT", "15"))   # one call
+GEMINI_BUDGET = float(os.environ.get("GEMINI_BUDGET", "25"))     # all retries together, then the built-in parser
 
 # --------------------------------------------------------------------------- reading
 
@@ -423,11 +424,11 @@ def claude_available() -> bool:
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 
 
-def _gemini_call(model: str, key: str, body: dict) -> dict:
+def _gemini_call(model: str, key: str, body: dict, timeout: float = GEMINI_TIMEOUT) -> dict:
     req = urllib.request.Request(GEMINI_URL.format(model=model), data=json.dumps(body).encode(), method="POST",
                                  headers={"Content-Type": "application/json", "x-goog-api-key": key})
     try:
-        with urllib.request.urlopen(req, timeout=GEMINI_TIMEOUT) as r:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
             return json.loads(r.read())
     except urllib.error.HTTPError as e:
         detail = e.read().decode(errors="replace")
@@ -438,18 +439,23 @@ def _gemini_call(model: str, key: str, body: dict) -> dict:
         raise RuntimeError(f"Gemini HTTP {e.code}: {detail[:200]}") from None
 
 
-def _gemini_once(model: str, key: str, data: str) -> dict:
+def _gemini_once(model: str, key: str, data: str, deadline: float) -> dict:
+    def left():
+        t = min(GEMINI_TIMEOUT, deadline - time.monotonic())
+        if t < 2:
+            raise RuntimeError("timed out: Gemini time budget used up")
+        return t
     parts = [{"inline_data": {"mime_type": "application/pdf", "data": data}}, {"text": PROMPT}]
     config = {"temperature": 0, "responseMimeType": "application/json", "responseJsonSchema": SCHEMA}
     try:
-        return _gemini_call(model, key, {"contents": [{"parts": parts}], "generationConfig": config})
+        return _gemini_call(model, key, {"contents": [{"parts": parts}], "generationConfig": config}, left())
     except RuntimeError as e:
         if "HTTP 400" not in str(e):
             raise
         # Older models reject responseJsonSchema: ask for the same JSON shape in the prompt instead.
         parts[1] = {"text": PROMPT + "\n\nReturn only JSON matching this JSON Schema:\n" + json.dumps(SCHEMA)}
         return _gemini_call(model, key, {"contents": [{"parts": parts}],
-                                         "generationConfig": {"temperature": 0, "responseMimeType": "application/json"}})
+                                         "generationConfig": {"temperature": 0, "responseMimeType": "application/json"}}, left())
 
 
 BUSY = ("HTTP 429", "HTTP 500", "HTTP 502", "HTTP 503", "HTTP 504", "timed out")
@@ -461,21 +467,31 @@ def extract_with_gemini(path: str) -> dict:
     key = os.environ["GEMINI_API_KEY"]
     data = base64.standard_b64encode(open(path, "rb").read()).decode()
     models = [GEMINI_MODEL] + [m.strip() for m in GEMINI_FALLBACK_MODELS.split(",") if m.strip() and m.strip() != GEMINI_MODEL]
-    last = None
+    start = time.monotonic()
+    deadline = start + GEMINI_BUDGET
+    last, tried = None, []
     for model in models:
         for attempt in range(2):
+            if deadline - time.monotonic() < 2:
+                break
+            t0 = time.monotonic()
             try:
-                resp = _gemini_once(model, key, data)
-                out = _parse_gemini(resp)
+                out = _parse_gemini(_gemini_once(model, key, data, deadline))
+                print(f"[extract] {model} answered in {time.monotonic() - t0:.1f}s (total {time.monotonic() - start:.1f}s)")
                 out["reader"] = f"Gemini ({model})"
                 return out
             except (RuntimeError, TimeoutError, urllib.error.URLError) as e:
                 last = e
-                if not any(b in str(e) for b in BUSY) and not isinstance(e, (TimeoutError, urllib.error.URLError)):
+                tried.append(f"{model} {time.monotonic() - t0:.0f}s")
+                print(f"[extract] {model} attempt {attempt + 1} failed after {time.monotonic() - t0:.1f}s: {e}")
+                slow = isinstance(e, (TimeoutError, urllib.error.URLError)) or "timed out" in str(e)
+                if not slow and not any(b in str(e) for b in BUSY):
                     raise  # a real error (bad key, bad answer): retrying will not help
-                if attempt == 0:
-                    time.sleep(1.5)
-    raise RuntimeError(f"all Gemini models busy ({', '.join(models)}). Last: {last}")
+                if slow:
+                    break  # a model that hung will likely hang again: try the next one
+                if attempt == 0 and deadline - time.monotonic() > 4:
+                    time.sleep(1)
+    raise RuntimeError(f"Gemini busy or slow, gave up after {time.monotonic() - start:.0f}s ({'; '.join(tried)}). Last: {last}")
 
 
 def _parse_gemini(resp: dict) -> dict:
